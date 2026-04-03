@@ -8,7 +8,7 @@
 /docs/ @AI-native-Systems-Research/docs
 
 # Security policy owner
-SECURITY.md @AI-native-Systems-Research/security
+SECURITY.md 
 
 # CI and GitHub Actions
 .github/workflows/ @AI-native-Systems-Research/ci
