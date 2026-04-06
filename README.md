@@ -95,3 +95,19 @@ Available benchmark suites:
 | `actor_latency` | Actor activation time and message round-trip |
 | `numa_latency_benchmark` | Same-node vs cross-node SPSC latency |
 | `numa_throughput_benchmark` | Same-node vs cross-node SPSC throughput |
+
+After running benchmarks, Criterion generates an HTML report with distribution plots, violin charts, and regression analysis. Open the top-level report index in a browser:
+
+```bash
+# Open the Criterion report (after running cargo bench)
+firefox --no-remote components/component-framework/crates/component-framework/target/criterion/report/index.html
+```
+
+Each benchmark suite has its own sub-report with detailed plots including PDF distribution, iteration times, and comparison against previous runs. Navigate from the index page or access individual reports directly:
+
+```bash
+# Example: open the SPSC channel benchmark report
+firefox --no-remote ./components/component-framework/crates/component-framework/target/criterion/spsc_throughput_u64/report/index.html
+```
+
+If you are using a remote connection in VS Code, you can use the Live Preview extension to open the remote report files.
