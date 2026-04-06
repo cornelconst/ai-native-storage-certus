@@ -1,10 +1,20 @@
 [workspace]
 # Paths to sub-projects
-members = ["tmp-project"]
+members = [
+    "components/component-framework/crates/component-core",
+    "components/component-framework/crates/component-macros",
+    "components/component-framework/crates/component-framework",
+    "components/component-framework/examples",
+]
 
-# Shared dependencies for all workspace members (optional)
-[workspace.dependencies]
-
-
-# Use the latest dependency resolver
 resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+[workspace.dependencies]
+component-core = { path = "components/component-framework/crates/component-core" }
+component-macros = { path = "components/component-framework/crates/component-macros" }
+component-framework = { path = "components/component-framework/crates/component-framework" }
