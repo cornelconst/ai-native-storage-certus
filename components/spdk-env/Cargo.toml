@@ -1,0 +1,16 @@
+[package]
+name = "spdk-env"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+component-framework.workspace = true
+component-core.workspace = true
+example-logger.workspace = true
+spdk-sys.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

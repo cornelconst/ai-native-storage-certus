@@ -1,0 +1,199 @@
+//! SPDK/DPDK environment initialization, singleton management, and device enumeration.
+
+use crate::checks;
+use crate::device::{PciAddress, PciId, VfioDevice};
+use crate::error::SpdkEnvError;
+use crate::SPDKEnvComponent;
+use std::ffi::CString;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Process-global flag enforcing singleton SPDK environment.
+static SPDK_ENV_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Perform the full initialization sequence for an SPDKEnvComponent.
+///
+/// Order: logger check -> singleton check -> VFIO checks -> permissions ->
+/// hugepages -> SPDK env init -> PCI enumeration.
+pub(crate) fn do_init(comp: &SPDKEnvComponent) -> Result<(), SpdkEnvError> {
+    // 1. Logger connectivity check.
+    if !comp.logger.is_connected() {
+        return Err(SpdkEnvError::LoggerNotConnected(
+            "Logger receptacle not connected. Call comp.logger.connect() before init().".into(),
+        ));
+    }
+
+    // 2. Singleton check.
+    if SPDK_ENV_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(SpdkEnvError::AlreadyInitialized(
+            "SPDK environment already active in this process (singleton constraint).".into(),
+        ));
+    }
+
+    // From here on, if we fail we must clear the singleton flag.
+    let result = do_init_inner(comp);
+    if result.is_err() {
+        SPDK_ENV_ACTIVE.store(false, Ordering::Release);
+    }
+    result
+}
+
+/// Inner initialization that runs after singleton flag is acquired.
+fn do_init_inner(comp: &SPDKEnvComponent) -> Result<(), SpdkEnvError> {
+    // 3. Pre-flight checks.
+    checks::check_vfio_available()?;
+    checks::check_vfio_permissions()?;
+    checks::check_hugepages()?;
+
+    // Log progress.
+    log_info(
+        comp,
+        "Pre-flight checks passed. Initializing SPDK/DPDK environment...",
+    );
+
+    // 4. Initialize SPDK environment.
+    init_spdk_env()?;
+
+    log_info(
+        comp,
+        "SPDK/DPDK environment initialized. Enumerating devices...",
+    );
+
+    // 5. Enumerate PCI devices.
+    let devices = enumerate_devices(comp)?;
+
+    log_info(
+        comp,
+        &format!(
+            "Device enumeration complete. Found {} device(s).",
+            devices.len()
+        ),
+    );
+
+    // Store discovered devices.
+    let mut dev_lock = comp
+        .discovered_devices
+        .write()
+        .expect("devices lock poisoned");
+    *dev_lock = devices;
+
+    // Mark as initialized.
+    comp.initialized
+        .store(true, std::sync::atomic::Ordering::Release);
+
+    Ok(())
+}
+
+/// Initialize the SPDK/DPDK environment via C FFI.
+fn init_spdk_env() -> Result<(), SpdkEnvError> {
+    let app_name = CString::new("certus-spdk-env").expect("CString::new failed");
+
+    // SAFETY: spdk_env_opts_init zeroes the struct and sets default values.
+    // The struct is stack-allocated and fully owned by us.
+    let mut opts: spdk_sys::spdk_env_opts = unsafe { std::mem::zeroed() };
+    unsafe {
+        spdk_sys::spdk_env_opts_init(&mut opts);
+    }
+
+    opts.name = app_name.as_ptr();
+    // Don't require specific cores — let DPDK use the default.
+    opts.shm_id = -1;
+
+    // SAFETY: spdk_env_init is called exactly once (enforced by singleton flag).
+    // The opts struct is valid for the duration of the call.
+    let rc = unsafe { spdk_sys::spdk_env_init(&opts) };
+    if rc != 0 {
+        return Err(SpdkEnvError::InitFailed(format!(
+            "spdk_env_init() returned {rc}. Check DPDK EAL log output for details."
+        )));
+    }
+
+    Ok(())
+}
+
+/// Enumerate all PCI devices visible to SPDK after environment initialization.
+fn enumerate_devices(_comp: &SPDKEnvComponent) -> Result<Vec<VfioDevice>, SpdkEnvError> {
+    let mut devices = Vec::new();
+
+    // SAFETY: spdk_pci_for_each_device iterates attached PCI devices.
+    // The callback receives a valid spdk_pci_device pointer for each device.
+    // We only read from the device struct via accessor functions.
+    // The callback context pointer is valid for the duration of the call.
+    unsafe {
+        spdk_sys::spdk_pci_for_each_device(
+            &mut devices as *mut Vec<VfioDevice> as *mut std::ffi::c_void,
+            Some(pci_device_callback),
+        );
+    }
+
+    Ok(devices)
+}
+
+/// Callback invoked by `spdk_pci_for_each_device` for each attached PCI device.
+///
+/// # Safety
+///
+/// This is called from C code. `ctx` must point to a valid `Vec<VfioDevice>`.
+/// `dev` must be a valid `spdk_pci_device` pointer.
+unsafe extern "C" fn pci_device_callback(
+    ctx: *mut std::ffi::c_void,
+    dev: *mut spdk_sys::spdk_pci_device,
+) {
+    let devices = &mut *(ctx as *mut Vec<VfioDevice>);
+
+    // SAFETY: All accessor functions take a valid spdk_pci_device pointer
+    // and return scalar values. The pointer is valid for this callback's duration.
+    let addr = spdk_sys::spdk_pci_device_get_addr(dev);
+    let id = spdk_sys::spdk_pci_device_get_id(dev);
+    let numa = spdk_sys::spdk_pci_device_get_numa_id(dev);
+
+    // Read the device type string from the struct directly.
+    let dev_type = if !(*dev).type_.is_null() {
+        std::ffi::CStr::from_ptr((*dev).type_)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        "unknown".to_string()
+    };
+
+    devices.push(VfioDevice {
+        address: PciAddress {
+            domain: addr.domain,
+            bus: addr.bus,
+            dev: addr.dev,
+            func: addr.func,
+        },
+        id: PciId {
+            class_id: id.class_id,
+            vendor_id: id.vendor_id,
+            device_id: id.device_id,
+            subvendor_id: id.subvendor_id,
+            subdevice_id: id.subdevice_id,
+        },
+        numa_node: numa,
+        device_type: dev_type,
+    });
+}
+
+/// Call `spdk_env_fini()` and clear the singleton flag.
+pub(crate) fn do_fini() {
+    // SAFETY: spdk_env_fini is safe to call after successful spdk_env_init.
+    // We only call this from Drop when initialized is true.
+    unsafe {
+        spdk_sys::spdk_env_fini();
+    }
+    SPDK_ENV_ACTIVE.store(false, Ordering::Release);
+}
+
+/// Send an info-level log message through the logger receptacle.
+fn log_info(comp: &SPDKEnvComponent, msg: &str) {
+    if let Ok(logger) = comp.logger.get() {
+        // ILogger only has name() — for actual log delivery we'd use the actor handle.
+        // For now, just acknowledge the logger is connected.
+        let _ = logger.name();
+    }
+    // Also print to stderr for direct visibility during initialization.
+    eprintln!("[spdk-env] {msg}");
+}
