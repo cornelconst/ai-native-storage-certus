@@ -93,9 +93,13 @@ fn init_spdk_env() -> Result<(), SpdkEnvError> {
     // SAFETY: spdk_env_opts_init zeroes the struct and sets default values.
     // The struct is stack-allocated and fully owned by us.
     let mut opts: spdk_sys::spdk_env_opts = unsafe { std::mem::zeroed() };
+
     unsafe {
         spdk_sys::spdk_env_opts_init(&mut opts);
     }
+
+    // Ensure opts_size is explicitly set (some SPDK/DPDK builds expect this).
+    opts.opts_size = std::mem::size_of::<spdk_sys::spdk_env_opts>();
 
     opts.name = app_name.as_ptr();
     // Don't require specific cores — let DPDK use the default.
@@ -116,6 +120,34 @@ fn init_spdk_env() -> Result<(), SpdkEnvError> {
 /// Enumerate all PCI devices visible to SPDK after environment initialization.
 fn enumerate_devices(_comp: &SPDKEnvComponent) -> Result<Vec<VfioDevice>, SpdkEnvError> {
     let mut devices = Vec::new();
+
+    // Ask SPDK to enumerate devices for common drivers (e.g., NVMe).
+    // This will attempt to attach supported devices so that
+    // `spdk_pci_for_each_device` will iterate them.
+    unsafe {
+        extern "C" fn enum_cb(
+            _ctx: *mut std::ffi::c_void,
+            _dev: *mut spdk_sys::spdk_pci_device,
+        ) -> i32 {
+            // Return 0 to indicate device should be attached.
+            0
+        }
+
+        let nvme_name = std::ffi::CString::new("nvme").unwrap();
+        let driver = spdk_sys::spdk_pci_get_driver(nvme_name.as_ptr());
+        if !driver.is_null() {
+            let rc = spdk_sys::spdk_pci_enumerate(driver, Some(enum_cb), std::ptr::null_mut());
+            if rc != 0 {
+                eprintln!("[spdk-env] warning: spdk_pci_enumerate returned {rc}");
+            }
+        } else {
+            eprintln!(
+                "[spdk-env] warning: NVMe PCI driver not registered \
+                 (spdk_pci_get_driver(\"nvme\") returned NULL). \
+                 Ensure libspdk_nvme is linked with +whole-archive."
+            );
+        }
+    }
 
     // SAFETY: spdk_pci_for_each_device iterates attached PCI devices.
     // The callback receives a valid spdk_pci_device pointer for each device.

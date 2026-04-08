@@ -22,6 +22,23 @@ fn main() {
     println!("cargo:rustc-link-lib=static=spdk_log");
     println!("cargo:rustc-link-lib=static=spdk_util");
 
+    // NVMe driver — linked with +whole-archive so the PCI driver constructor
+    // (SPDK_PCI_DRIVER_REGISTER) is included by the linker.  Without this,
+    // spdk_pci_get_driver("nvme") returns NULL and no NVMe devices are enumerated.
+    println!("cargo:rustc-link-lib=static:+whole-archive=spdk_nvme");
+
+    // Transitive dependencies of spdk_nvme (from spdk_nvme.pc / spdk_sock.pc):
+    println!("cargo:rustc-link-lib=static=spdk_trace");
+    println!("cargo:rustc-link-lib=static=spdk_dma");
+    println!("cargo:rustc-link-lib=static=spdk_keyring");
+    println!("cargo:rustc-link-lib=static=spdk_json");
+    println!("cargo:rustc-link-lib=static=spdk_jsonrpc");
+    println!("cargo:rustc-link-lib=static=spdk_rpc");
+    println!("cargo:rustc-link-lib=static=spdk_sock");
+    // sock_posix needs +whole-archive for its socket module constructor.
+    println!("cargo:rustc-link-lib=static:+whole-archive=spdk_sock_posix");
+    println!("cargo:rustc-link-lib=static=spdk_thread");
+
     // Link DPDK libraries (static).
     // These are the libraries that spdk_env_dpdk depends on, discovered from
     // the spdk_env_dpdk.pc and libdpdk.pc files. We link them manually because
@@ -72,11 +89,34 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=ssl");
     println!("cargo:rustc-link-lib=dylib=crypto");
     println!("cargo:rustc-link-lib=dylib=m");
+    // Link the FUSE library (CUSE support) — required by spdk_nvme CUSE code.
+    // Link libfuse3 (preferred). Do not link generic 'fuse' to avoid
+    // requiring unversioned dev symlinks on the host.
+    println!("cargo:rustc-link-lib=dylib=fuse3");
+
+    // Detect the GCC internal include path so that clang (used by bindgen)
+    // can resolve `#include_next <limits.h>` from the system headers.
+    let gcc_include = std::process::Command::new("gcc")
+        .args(["-print-file-name=include"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            let p = String::from_utf8(o.stdout).ok()?.trim().to_string();
+            if p.is_empty() || p == "include" {
+                None
+            } else {
+                Some(p)
+            }
+        });
 
     // Generate bindings with bindgen.
-    let builder = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .header("wrapper.h")
         .clang_arg(format!("-I{}", include_dir.display()));
+
+    if let Some(ref gcc_inc) = gcc_include {
+        builder = builder.clang_arg(format!("-I{gcc_inc}"));
+    }
 
     let bindings = builder
         .allowlist_function("spdk_env_opts_init")

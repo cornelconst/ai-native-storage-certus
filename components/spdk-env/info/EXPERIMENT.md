@@ -16,3 +16,7 @@ established good engineering practice, maintainability and meeting performance r
 + Make sure there are no references to /home/dwaddington. An environment variable should be used instead.
   
 + Add unit tests for spdk-env and spdk-sys components.
+
++ Write a script in the scripts dir, that allows the user to detach SSD devices from the kernel-driver and attach the vfio-driver
+
++ The --example sdpk-env-example is not showing devices that our bound to vfio-pci. The SPDK tool spdk_nvme_identify, shows the available device correctly. 
