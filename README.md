@@ -10,11 +10,12 @@ Certus is a generative domain-specific filesystem for inferencing workloads. The
 - Linux (tested on RHEL/Fedora)
 - `memlock` set to unlimited in `/etc/security/limits.conf` (required for SPDK hugepage and VFIO usage):
   ```
-  * - memlock unlimited
+  * hard memlock unlimited
+  * soft memlock unlimited
   ```
   Log out and back in after making this change for it to take effect.
 
-  
+
 - Kernel boot parameters for IOMMU and hugepages must be configured (one-time setup, requires reboot):
   ```bash
   # For Intel:
