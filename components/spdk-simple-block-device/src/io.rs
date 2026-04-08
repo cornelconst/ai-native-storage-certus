@@ -9,7 +9,7 @@
 //! `spdk_nvme_qpair_process_completions` until the callback fires.
 
 use crate::error::BlockDeviceError;
-use spdk_env::ISPDKEnv;
+use spdk_env::{DmaBuffer, ISPDKEnv};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
@@ -20,8 +20,8 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 /// These pointers are valid between [`open_device`] and [`close_device`].
 /// The caller must ensure single-threaded access to the qpair (SPDK requirement).
 pub struct InnerState {
-    pub(crate) ctrlr: *mut spdk_sys::spdk_nvme_ctrlr,
-    pub(crate) ns: *mut spdk_sys::spdk_nvme_ns,
+    pub ctrlr: *mut spdk_sys::spdk_nvme_ctrlr,
+    pub ns: *mut spdk_sys::spdk_nvme_ns,
     pub(crate) qpair: *mut spdk_sys::spdk_nvme_qpair,
     pub sector_size: u32,
     pub num_sectors: u64,
@@ -145,14 +145,14 @@ pub fn close_device(state: InnerState) {
     log("Block device closed.");
 }
 
-/// Read `buf.len()` bytes starting at `lba`. Buffer must be a multiple of sector size.
+/// Read into a caller-provided [`DmaBuffer`] starting at `lba` (zero-copy).
 ///
-/// Allocates a DMA buffer, submits the NVMe read, polls for completion,
-/// then copies the data to the caller's buffer.
+/// `buf.len()` must be a positive multiple of the device sector size.
+/// The NVMe device writes directly into the DMA buffer — no intermediate copies.
 pub fn read_blocks(
     state: &InnerState,
     lba: u64,
-    buf: &mut [u8],
+    buf: &mut DmaBuffer,
 ) -> Result<(), BlockDeviceError> {
     let sector_size = state.sector_size as usize;
     if buf.is_empty() || buf.len() % sector_size != 0 {
@@ -163,17 +163,6 @@ pub fn read_blocks(
     }
     let lba_count = (buf.len() / sector_size) as u32;
 
-    // Allocate DMA-safe buffer.
-    // SAFETY: spdk_dma_zmalloc returns hugepage-backed memory suitable for DMA.
-    let dma_buf =
-        unsafe { spdk_sys::spdk_dma_zmalloc(buf.len(), sector_size, ptr::null_mut()) };
-    if dma_buf.is_null() {
-        return Err(BlockDeviceError::DmaAllocationFailed(format!(
-            "spdk_dma_zmalloc({}) returned NULL.",
-            buf.len()
-        )));
-    }
-
     let done = AtomicBool::new(false);
     let status = AtomicI32::new(0);
     let ctx = CompletionContext {
@@ -181,13 +170,13 @@ pub fn read_blocks(
         status: &status,
     };
 
-    // SAFETY: ns, qpair, and dma_buf are all valid. The callback context
+    // SAFETY: ns, qpair, and buf.as_ptr() are all valid. The callback context
     // lives on our stack and remains valid until we finish polling below.
     let rc = unsafe {
         spdk_sys::spdk_nvme_ns_cmd_read(
             state.ns,
             state.qpair,
-            dma_buf,
+            buf.as_ptr(),
             lba,
             lba_count,
             Some(io_completion_cb),
@@ -197,7 +186,6 @@ pub fn read_blocks(
     };
 
     if rc != 0 {
-        unsafe { spdk_sys::spdk_dma_free(dma_buf) };
         return Err(BlockDeviceError::ReadFailed(format!(
             "spdk_nvme_ns_cmd_read() returned {rc}."
         )));
@@ -213,30 +201,22 @@ pub fn read_blocks(
 
     let cpl_status = status.load(Ordering::Acquire);
     if cpl_status != 0 {
-        unsafe { spdk_sys::spdk_dma_free(dma_buf) };
         return Err(BlockDeviceError::ReadFailed(format!(
             "NVMe read completion status: {cpl_status:#x}."
         )));
     }
 
-    // Copy from DMA buffer to caller's buffer.
-    // SAFETY: dma_buf has buf.len() bytes, allocated above.
-    unsafe {
-        ptr::copy_nonoverlapping(dma_buf as *const u8, buf.as_mut_ptr(), buf.len());
-        spdk_sys::spdk_dma_free(dma_buf);
-    }
-
     Ok(())
 }
 
-/// Write `buf.len()` bytes starting at `lba`. Buffer must be a multiple of sector size.
+/// Write from a caller-provided [`DmaBuffer`] starting at `lba` (zero-copy).
 ///
-/// Copies the caller's data into a DMA buffer, submits the NVMe write,
-/// and polls for completion.
+/// `buf.len()` must be a positive multiple of the device sector size.
+/// The NVMe device reads directly from the DMA buffer — no intermediate copies.
 pub fn write_blocks(
     state: &InnerState,
     lba: u64,
-    buf: &[u8],
+    buf: &DmaBuffer,
 ) -> Result<(), BlockDeviceError> {
     let sector_size = state.sector_size as usize;
     if buf.is_empty() || buf.len() % sector_size != 0 {
@@ -247,22 +227,6 @@ pub fn write_blocks(
     }
     let lba_count = (buf.len() / sector_size) as u32;
 
-    // Allocate DMA-safe buffer and copy data in.
-    // SAFETY: spdk_dma_zmalloc returns hugepage-backed memory suitable for DMA.
-    let dma_buf =
-        unsafe { spdk_sys::spdk_dma_zmalloc(buf.len(), sector_size, ptr::null_mut()) };
-    if dma_buf.is_null() {
-        return Err(BlockDeviceError::DmaAllocationFailed(format!(
-            "spdk_dma_zmalloc({}) returned NULL.",
-            buf.len()
-        )));
-    }
-
-    // SAFETY: dma_buf has buf.len() bytes of valid memory.
-    unsafe {
-        ptr::copy_nonoverlapping(buf.as_ptr(), dma_buf as *mut u8, buf.len());
-    }
-
     let done = AtomicBool::new(false);
     let status = AtomicI32::new(0);
     let ctx = CompletionContext {
@@ -270,13 +234,13 @@ pub fn write_blocks(
         status: &status,
     };
 
-    // SAFETY: ns, qpair, and dma_buf are all valid. The callback context
+    // SAFETY: ns, qpair, and buf.as_ptr() are all valid. The callback context
     // lives on our stack and remains valid until we finish polling below.
     let rc = unsafe {
         spdk_sys::spdk_nvme_ns_cmd_write(
             state.ns,
             state.qpair,
-            dma_buf,
+            buf.as_ptr(),
             lba,
             lba_count,
             Some(io_completion_cb),
@@ -286,7 +250,6 @@ pub fn write_blocks(
     };
 
     if rc != 0 {
-        unsafe { spdk_sys::spdk_dma_free(dma_buf) };
         return Err(BlockDeviceError::WriteFailed(format!(
             "spdk_nvme_ns_cmd_write() returned {rc}."
         )));
@@ -300,8 +263,6 @@ pub fn write_blocks(
         }
     }
 
-    unsafe { spdk_sys::spdk_dma_free(dma_buf) };
-
     let cpl_status = status.load(Ordering::Acquire);
     if cpl_status != 0 {
         return Err(BlockDeviceError::WriteFailed(format!(
@@ -313,13 +274,160 @@ pub fn write_blocks(
 }
 
 // ---------------------------------------------------------------------------
-// Internal helpers
+// Multi-qpair support
+// ---------------------------------------------------------------------------
+
+/// Allocate an additional I/O queue pair from an already-attached controller.
+///
+/// Returns a new [`InnerState`] with its own qpair but shared ctrlr/ns pointers.
+/// Use [`free_qpair`] to release the qpair without detaching the controller.
+///
+/// # Safety
+///
+/// `ctrlr` and `ns` must be valid pointers from a prior [`open_device`] call.
+pub unsafe fn alloc_qpair(
+    ctrlr: *mut spdk_sys::spdk_nvme_ctrlr,
+    ns: *mut spdk_sys::spdk_nvme_ns,
+    sector_size: u32,
+    num_sectors: u64,
+) -> Result<InnerState, BlockDeviceError> {
+    let qpair = spdk_sys::spdk_nvme_ctrlr_alloc_io_qpair(ctrlr, ptr::null(), 0);
+    if qpair.is_null() {
+        return Err(BlockDeviceError::QpairAllocationFailed(
+            "spdk_nvme_ctrlr_alloc_io_qpair() returned NULL.".into(),
+        ));
+    }
+    Ok(InnerState {
+        ctrlr,
+        ns,
+        qpair,
+        sector_size,
+        num_sectors,
+    })
+}
+
+/// Free an I/O queue pair without detaching the controller.
+///
+/// Use this for worker qpairs that share a controller with the primary
+/// [`InnerState`] from [`open_device`].
+pub fn free_qpair(state: InnerState) {
+    unsafe {
+        spdk_sys::spdk_nvme_ctrlr_free_io_qpair(state.qpair);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async (non-blocking) I/O primitives
+// ---------------------------------------------------------------------------
+
+/// Submit a read command without waiting for completion (non-blocking).
+///
+/// The caller must call [`poll_completions`] on the same qpair to drive
+/// completion. `cb` / `cb_arg` define the NVMe completion callback.
+///
+/// # Safety
+///
+/// `cb_arg` must remain valid until the completion callback fires.
+pub unsafe fn submit_read(
+    state: &InnerState,
+    lba: u64,
+    buf: &mut DmaBuffer,
+    cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, *const spdk_sys::spdk_nvme_cpl),
+    >,
+    cb_arg: *mut std::ffi::c_void,
+) -> Result<(), BlockDeviceError> {
+    let sector_size = state.sector_size as usize;
+    if buf.is_empty() || buf.len() % sector_size != 0 {
+        return Err(BlockDeviceError::BufferSizeMismatch(format!(
+            "Buffer length {} is not a positive multiple of sector size {sector_size}.",
+            buf.len()
+        )));
+    }
+    let lba_count = (buf.len() / sector_size) as u32;
+
+    let rc = spdk_sys::spdk_nvme_ns_cmd_read(
+        state.ns,
+        state.qpair,
+        buf.as_ptr(),
+        lba,
+        lba_count,
+        cb,
+        cb_arg,
+        0,
+    );
+    if rc != 0 {
+        return Err(BlockDeviceError::ReadFailed(format!(
+            "spdk_nvme_ns_cmd_read() returned {rc}."
+        )));
+    }
+    Ok(())
+}
+
+/// Submit a write command without waiting for completion (non-blocking).
+///
+/// The caller must call [`poll_completions`] on the same qpair to drive
+/// completion. `cb` / `cb_arg` define the NVMe completion callback.
+///
+/// # Safety
+///
+/// `cb_arg` must remain valid until the completion callback fires.
+pub unsafe fn submit_write(
+    state: &InnerState,
+    lba: u64,
+    buf: &DmaBuffer,
+    cb: Option<
+        unsafe extern "C" fn(*mut std::ffi::c_void, *const spdk_sys::spdk_nvme_cpl),
+    >,
+    cb_arg: *mut std::ffi::c_void,
+) -> Result<(), BlockDeviceError> {
+    let sector_size = state.sector_size as usize;
+    if buf.is_empty() || buf.len() % sector_size != 0 {
+        return Err(BlockDeviceError::BufferSizeMismatch(format!(
+            "Buffer length {} is not a positive multiple of sector size {sector_size}.",
+            buf.len()
+        )));
+    }
+    let lba_count = (buf.len() / sector_size) as u32;
+
+    let rc = spdk_sys::spdk_nvme_ns_cmd_write(
+        state.ns,
+        state.qpair,
+        buf.as_ptr(),
+        lba,
+        lba_count,
+        cb,
+        cb_arg,
+        0,
+    );
+    if rc != 0 {
+        return Err(BlockDeviceError::WriteFailed(format!(
+            "spdk_nvme_ns_cmd_write() returned {rc}."
+        )));
+    }
+    Ok(())
+}
+
+/// Poll the qpair for completions. Returns the number of completions processed.
+///
+/// Pass `max_completions = 0` to process all available completions.
+pub fn poll_completions(state: &InnerState, max_completions: u32) -> i32 {
+    unsafe { spdk_sys::spdk_nvme_qpair_process_completions(state.qpair, max_completions) }
+}
+
+// ---------------------------------------------------------------------------
+// Completion helpers (public for use by benchmarks)
 // ---------------------------------------------------------------------------
 
 /// Context passed through the NVMe I/O completion callback.
-struct CompletionContext<'a> {
-    done: &'a AtomicBool,
-    status: &'a AtomicI32,
+///
+/// Public so that benchmarks and other callers can use [`io_completion_cb`]
+/// with their own `CompletionContext` instances.
+pub struct CompletionContext<'a> {
+    /// Set to `true` when the I/O completes.
+    pub done: &'a AtomicBool,
+    /// NVMe completion status (0 = success).
+    pub status: &'a AtomicI32,
 }
 
 /// NVMe I/O completion callback. Sets the done flag and records the status.
@@ -328,7 +436,7 @@ struct CompletionContext<'a> {
 ///
 /// Called from C code via `spdk_nvme_qpair_process_completions`.
 /// `cb_arg` must point to a valid `CompletionContext` on the caller's stack.
-unsafe extern "C" fn io_completion_cb(
+pub unsafe extern "C" fn io_completion_cb(
     cb_arg: *mut std::ffi::c_void,
     cpl: *const spdk_sys::spdk_nvme_cpl,
 ) {

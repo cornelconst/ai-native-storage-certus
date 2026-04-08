@@ -13,6 +13,19 @@ members = [
     "apps/helloworld-mainline",
 ]
 
+# SPDK crates require pre-built native libraries at deps/spdk-build/.
+# They are excluded from default builds so `cargo build` succeeds without
+# SPDK deps. Build them explicitly with: cargo build -p spdk-simple-block-device
+default-members = [
+    "components/component-framework/crates/component-core",
+    "components/component-framework/crates/component-macros",
+    "components/component-framework/crates/component-framework",
+    "components/component-framework/examples",
+    "components/example-helloworld",
+    "components/example-logger",
+    "apps/helloworld-mainline",
+]
+
 resolver = "2"
 
 [workspace.package]

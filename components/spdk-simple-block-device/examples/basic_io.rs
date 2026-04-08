@@ -1,7 +1,7 @@
-//! Basic block I/O example.
+//! Basic block I/O example (zero-copy with DMA buffers).
 //!
 //! Wires the logger, SPDK environment, and simple block device components,
-//! then demonstrates a write-read-verify cycle.
+//! then demonstrates a write-read-verify cycle using caller-provided DMA buffers.
 //!
 //! # Prerequisites
 //!
@@ -15,13 +15,13 @@
 
 use component_framework::iunknown::query;
 use example_logger::{ILogger, LoggerComponent};
-use spdk_env::{ISPDKEnv, SPDKEnvComponent};
+use spdk_env::{DmaBuffer, ISPDKEnv, SPDKEnvComponent};
 use spdk_simple_block_device::{default_device_state, IBlockDevice, SimpleBlockDevice};
 use std::sync::atomic::AtomicBool;
 use std::sync::RwLock;
 
 fn main() {
-    println!("=== Simple Block Device Example ===\n");
+    println!("=== Simple Block Device Example (Zero-Copy) ===\n");
 
     // --- Instantiate components ---
 
@@ -74,15 +74,15 @@ fn main() {
         (num_sectors * sector_size as u64) / (1024 * 1024)
     );
 
-    // --- Write-Read-Verify cycle ---
+    // --- Write-Read-Verify cycle (zero-copy) ---
 
-    // Use the last sector to avoid disturbing partition tables / filesystem metadata.
     let test_lba = num_sectors - 1;
     println!("Writing test pattern to LBA {test_lba}...");
 
-    // Create a test pattern: each byte is (offset % 251) to detect byte-shift errors.
-    let mut write_buf = vec![0u8; sector_size];
-    for (i, byte) in write_buf.iter_mut().enumerate() {
+    // Allocate DMA buffer and fill with test pattern.
+    let mut write_buf =
+        DmaBuffer::new(sector_size, sector_size).expect("DMA alloc failed");
+    for (i, byte) in write_buf.as_mut_slice().iter_mut().enumerate() {
         *byte = (i % 251) as u8;
     }
 
@@ -90,21 +90,23 @@ fn main() {
         .expect("Write failed");
     println!("Write complete.");
 
-    // Read it back.
+    // Read it back into a separate DMA buffer.
     println!("Reading back LBA {test_lba}...");
-    let mut read_buf = vec![0u8; sector_size];
+    let mut read_buf =
+        DmaBuffer::new(sector_size, sector_size).expect("DMA alloc failed");
     bdev.read_blocks(test_lba, &mut read_buf)
         .expect("Read failed");
     println!("Read complete.");
 
     // Verify.
-    if read_buf == write_buf {
+    if read_buf.as_slice() == write_buf.as_slice() {
         println!("Verification PASSED: read data matches written data.");
     } else {
         eprintln!("Verification FAILED: read data does not match written data!");
         let mismatches: Vec<_> = read_buf
+            .as_slice()
             .iter()
-            .zip(write_buf.iter())
+            .zip(write_buf.as_slice().iter())
             .enumerate()
             .filter(|(_, (r, w))| r != w)
             .take(10)
@@ -121,6 +123,5 @@ fn main() {
     bdev.close().expect("Close failed");
     println!("Block device closed.");
 
-    // SPDKEnvComponent::drop will call spdk_env_fini.
     println!("\n=== Done ===");
 }

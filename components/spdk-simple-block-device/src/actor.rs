@@ -19,7 +19,7 @@
 use crate::error::BlockDeviceError;
 use crate::io::{self, InnerState};
 use component_framework::actor::{ActorHandle, ActorHandler};
-use spdk_env::ISPDKEnv;
+use spdk_env::{DmaBuffer, ISPDKEnv, SpdkEnvError};
 use std::sync::mpsc;
 use std::sync::Arc;
 
@@ -42,17 +42,17 @@ pub enum BlockIoRequest {
     Open {
         reply: mpsc::SyncSender<Result<DeviceInfo, BlockDeviceError>>,
     },
-    /// Read `num_sectors` sectors starting at `lba`.
+    /// Read into caller-provided DMA buffer starting at `lba` (zero-copy).
     Read {
         lba: u64,
-        num_sectors: u32,
-        reply: mpsc::SyncSender<Result<Vec<u8>, BlockDeviceError>>,
+        buf: DmaBuffer,
+        reply: mpsc::SyncSender<Result<DmaBuffer, BlockDeviceError>>,
     },
-    /// Write `data` starting at `lba`. Data length must be sector-aligned.
+    /// Write from caller-provided DMA buffer starting at `lba` (zero-copy).
     Write {
         lba: u64,
-        data: Vec<u8>,
-        reply: mpsc::SyncSender<Result<(), BlockDeviceError>>,
+        buf: DmaBuffer,
+        reply: mpsc::SyncSender<Result<DmaBuffer, BlockDeviceError>>,
     },
     /// Free the I/O queue pair and detach the controller.
     Close {
@@ -112,28 +112,24 @@ impl ActorHandler<BlockIoRequest> for BlockDeviceHandler {
 
             BlockIoRequest::Read {
                 lba,
-                num_sectors,
+                mut buf,
                 reply,
             } => {
                 let result = match self.state.as_ref() {
                     None => Err(BlockDeviceError::NotOpen(
                         "Block device not open. Send Open first.".into(),
                     )),
-                    Some(inner) => {
-                        let byte_count = num_sectors as usize * inner.sector_size as usize;
-                        let mut buf = vec![0u8; byte_count];
-                        io::read_blocks(inner, lba, &mut buf).map(|()| buf)
-                    }
+                    Some(inner) => io::read_blocks(inner, lba, &mut buf).map(|()| buf),
                 };
                 let _ = reply.send(result);
             }
 
-            BlockIoRequest::Write { lba, data, reply } => {
+            BlockIoRequest::Write { lba, buf, reply } => {
                 let result = match self.state.as_ref() {
                     None => Err(BlockDeviceError::NotOpen(
                         "Block device not open. Send Open first.".into(),
                     )),
-                    Some(inner) => io::write_blocks(inner, lba, &data),
+                    Some(inner) => io::write_blocks(inner, lba, &buf).map(|()| buf),
                 };
                 let _ = reply.send(result);
             }
@@ -184,8 +180,10 @@ impl ActorHandler<BlockIoRequest> for BlockDeviceHandler {
 /// let info = client.open().unwrap();
 /// println!("sector_size={}", info.sector_size);
 ///
-/// let data = client.read_blocks(0, 1).unwrap();
-/// client.write_blocks(0, &data).unwrap();
+/// // Zero-copy: DMA buffer is passed to the device directly.
+/// let buf = client.alloc_dma_buffer(1).unwrap();
+/// let buf = client.read_blocks(0, buf).unwrap();
+/// let buf = client.write_blocks(0, buf).unwrap();
 ///
 /// client.close().unwrap();
 /// client.shutdown().unwrap();
@@ -212,19 +210,20 @@ impl BlockDeviceClient {
             .map_err(|e| BlockDeviceError::NotOpen(format!("actor reply failed: {e}")))?
     }
 
-    /// Read `num_sectors` sectors starting at `lba`.
+    /// Read into a caller-provided [`DmaBuffer`] starting at `lba` (zero-copy).
     ///
-    /// Returns the data as a `Vec<u8>` of length `num_sectors * sector_size`.
+    /// The buffer is sent to the actor thread and returned after the NVMe
+    /// read completes — no copies occur.
     pub fn read_blocks(
         &self,
         lba: u64,
-        num_sectors: u32,
-    ) -> Result<Vec<u8>, BlockDeviceError> {
+        buf: DmaBuffer,
+    ) -> Result<DmaBuffer, BlockDeviceError> {
         let (tx, rx) = mpsc::sync_channel(0);
         self.handle
             .send(BlockIoRequest::Read {
                 lba,
-                num_sectors,
+                buf,
                 reply: tx,
             })
             .map_err(|e| BlockDeviceError::ReadFailed(format!("actor send failed: {e}")))?;
@@ -232,20 +231,42 @@ impl BlockDeviceClient {
             .map_err(|e| BlockDeviceError::ReadFailed(format!("actor reply failed: {e}")))?
     }
 
-    /// Write `data` starting at `lba`.
+    /// Write from a caller-provided [`DmaBuffer`] starting at `lba` (zero-copy).
     ///
-    /// `data.len()` must be a positive multiple of the device sector size.
-    pub fn write_blocks(&self, lba: u64, data: &[u8]) -> Result<(), BlockDeviceError> {
+    /// The buffer is sent to the actor thread and returned after the NVMe
+    /// write completes — no copies occur. The caller can reuse the buffer.
+    pub fn write_blocks(
+        &self,
+        lba: u64,
+        buf: DmaBuffer,
+    ) -> Result<DmaBuffer, BlockDeviceError> {
         let (tx, rx) = mpsc::sync_channel(0);
         self.handle
             .send(BlockIoRequest::Write {
                 lba,
-                data: data.to_vec(),
+                buf,
                 reply: tx,
             })
             .map_err(|e| BlockDeviceError::WriteFailed(format!("actor send failed: {e}")))?;
         rx.recv()
             .map_err(|e| BlockDeviceError::WriteFailed(format!("actor reply failed: {e}")))?
+    }
+
+    /// Allocate a DMA buffer sized for `num_sectors` sectors.
+    ///
+    /// Convenience method that uses the cached sector size from [`open`].
+    /// Returns an error if the device has not been opened.
+    pub fn alloc_dma_buffer(&self, num_sectors: u32) -> Result<DmaBuffer, BlockDeviceError> {
+        let info = self.info().ok_or_else(|| {
+            BlockDeviceError::NotOpen("Cannot allocate DMA buffer: device not open.".into())
+        })?;
+        let size = num_sectors as usize * info.sector_size as usize;
+        DmaBuffer::new(size, info.sector_size as usize).map_err(|e| match e {
+            SpdkEnvError::DmaAllocationFailed(msg) => {
+                BlockDeviceError::DmaAllocationFailed(msg)
+            }
+            other => BlockDeviceError::DmaAllocationFailed(other.to_string()),
+        })
     }
 
     /// Close the block device: free the I/O queue pair and detach the controller.

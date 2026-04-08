@@ -1,7 +1,8 @@
-//! Actor-based block I/O example.
+//! Actor-based block I/O example (zero-copy with DMA buffers).
 //!
 //! Wires the logger and SPDK environment components, then uses the actor-based
-//! block device client to perform a write-read-verify cycle.
+//! block device client to perform a write-read-verify cycle. DMA buffers are
+//! allocated by the caller and passed through the actor channel — no copies.
 //!
 //! All NVMe operations run on the actor's dedicated thread, satisfying SPDK's
 //! single-thread-per-qpair requirement without the caller needing to worry
@@ -26,7 +27,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 fn main() {
-    println!("=== Actor Block Device Example ===\n");
+    println!("=== Actor Block Device Example (Zero-Copy) ===\n");
 
     // --- Instantiate and wire infrastructure components ---
 
@@ -73,33 +74,40 @@ fn main() {
         (info.num_sectors * info.sector_size as u64) / (1024 * 1024)
     );
 
-    // --- Write-Read-Verify cycle ---
+    // --- Write-Read-Verify cycle (zero-copy) ---
 
-    let sector_size = info.sector_size as usize;
     let test_lba = info.num_sectors - 1;
     println!("Writing test pattern to LBA {test_lba}...");
 
-    let mut write_buf = vec![0u8; sector_size];
-    for (i, byte) in write_buf.iter_mut().enumerate() {
+    // Allocate DMA buffer and fill with test pattern.
+    let mut write_buf = client.alloc_dma_buffer(1).expect("DMA alloc failed");
+    for (i, byte) in write_buf.as_mut_slice().iter_mut().enumerate() {
         *byte = (i % 251) as u8;
     }
 
-    client
-        .write_blocks(test_lba, &write_buf)
-        .expect("write failed");
-    println!("Write complete.");
+    // Keep a copy of the pattern for verification (small cost, test only).
+    let pattern: Vec<u8> = write_buf.as_slice().to_vec();
 
+    // Zero-copy write: DMA buffer goes to actor, comes back.
+    let write_buf = client
+        .write_blocks(test_lba, write_buf)
+        .expect("write failed");
+    println!("Write complete. Buffer returned to caller.");
+
+    // Zero-copy read: send a fresh DMA buffer, get it back with data.
     println!("Reading back LBA {test_lba}...");
-    let read_buf = client.read_blocks(test_lba, 1).expect("read failed");
+    let read_buf = client.alloc_dma_buffer(1).expect("DMA alloc failed");
+    let read_buf = client.read_blocks(test_lba, read_buf).expect("read failed");
     println!("Read complete.");
 
-    if read_buf == write_buf {
+    if read_buf.as_slice() == pattern.as_slice() {
         println!("Verification PASSED: read data matches written data.");
     } else {
         eprintln!("Verification FAILED: read data does not match written data!");
         let mismatches: Vec<_> = read_buf
+            .as_slice()
             .iter()
-            .zip(write_buf.iter())
+            .zip(pattern.iter())
             .enumerate()
             .filter(|(_, (r, w))| r != w)
             .take(10)
@@ -110,30 +118,36 @@ fn main() {
         std::process::exit(1);
     }
 
-    // --- Multi-sector I/O ---
+    // --- Multi-sector I/O (zero-copy, buffer reuse) ---
 
-    let multi_count = 4;
+    let multi_count: u32 = 4;
     let multi_lba = info.num_sectors - (multi_count as u64) - 1;
-    let multi_size = multi_count * sector_size;
     println!("\nWriting {multi_count} sectors starting at LBA {multi_lba}...");
 
-    let mut multi_buf = vec![0u8; multi_size];
-    for (i, byte) in multi_buf.iter_mut().enumerate() {
+    let mut multi_buf = client
+        .alloc_dma_buffer(multi_count)
+        .expect("DMA alloc failed");
+    for (i, byte) in multi_buf.as_mut_slice().iter_mut().enumerate() {
         *byte = ((i * 7 + 13) % 256) as u8;
     }
+    let multi_pattern: Vec<u8> = multi_buf.as_slice().to_vec();
 
-    client
-        .write_blocks(multi_lba, &multi_buf)
+    let multi_buf = client
+        .write_blocks(multi_lba, multi_buf)
         .expect("multi-sector write failed");
     println!("Multi-sector write complete.");
 
-    println!("Reading back {multi_count} sectors...");
-    let multi_read = client
-        .read_blocks(multi_lba, multi_count as u32)
+    // Reuse the same DMA buffer for reading back.
+    println!("Reading back {multi_count} sectors (reusing write buffer)...");
+    // Zero the buffer to prove the read fills it.
+    let mut multi_buf = multi_buf;
+    multi_buf.as_mut_slice().fill(0);
+    let multi_buf = client
+        .read_blocks(multi_lba, multi_buf)
         .expect("multi-sector read failed");
     println!("Multi-sector read complete.");
 
-    if multi_read == multi_buf {
+    if multi_buf.as_slice() == multi_pattern.as_slice() {
         println!("Multi-sector verification PASSED.");
     } else {
         eprintln!("Multi-sector verification FAILED!");
@@ -146,6 +160,16 @@ fn main() {
     assert_eq!(queried_info.sector_size, info.sector_size);
     assert_eq!(queried_info.num_sectors, info.num_sectors);
     println!("\nDevice info query confirmed: {:?}", queried_info);
+
+    // --- Demonstrate buffer reuse ---
+
+    println!("\nDemonstrating buffer reuse across operations...");
+    // write_buf was returned from write_blocks earlier — reuse it for a read.
+    let reused = client
+        .read_blocks(test_lba, write_buf)
+        .expect("reuse read failed");
+    assert_eq!(reused.as_slice(), pattern.as_slice());
+    println!("Buffer reuse PASSED.");
 
     // --- Close and shutdown ---
 

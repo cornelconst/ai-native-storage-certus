@@ -20,10 +20,12 @@
 
 pub mod checks;
 pub mod device;
+pub mod dma;
 pub mod env;
 pub mod error;
 
 pub use device::{PciAddress, PciId, VfioDevice};
+pub use dma::DmaBuffer;
 pub use error::SpdkEnvError;
 
 use component_framework::{define_component, define_interface};

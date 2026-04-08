@@ -22,6 +22,8 @@ pub enum SpdkEnvError {
     InitFailed(String),
     /// PCI device enumeration failed after environment was initialized.
     DeviceProbeFailed(String),
+    /// DMA buffer allocation failed (hugepage memory exhausted or env not initialized).
+    DmaAllocationFailed(String),
 }
 
 impl fmt::Display for SpdkEnvError {
@@ -36,6 +38,9 @@ impl fmt::Display for SpdkEnvError {
             SpdkEnvError::AlreadyInitialized(msg) => write!(f, "Already initialized: {msg}"),
             SpdkEnvError::InitFailed(msg) => write!(f, "SPDK init failed: {msg}"),
             SpdkEnvError::DeviceProbeFailed(msg) => write!(f, "Device probe failed: {msg}"),
+            SpdkEnvError::DmaAllocationFailed(msg) => {
+                write!(f, "DMA allocation failed: {msg}")
+            }
         }
     }
 }
@@ -128,6 +133,7 @@ mod tests {
             Box::new(SpdkEnvError::AlreadyInitialized("e".into())),
             Box::new(SpdkEnvError::InitFailed("f".into())),
             Box::new(SpdkEnvError::DeviceProbeFailed("g".into())),
+            Box::new(SpdkEnvError::DmaAllocationFailed("h".into())),
         ];
         for e in &variants {
             assert!(!e.to_string().is_empty());

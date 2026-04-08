@@ -33,8 +33,8 @@
 //! // env_comp.init().unwrap();
 //! // bdev.open().unwrap();
 //!
-//! // Read/write at sector granularity.
-//! // let mut buf = vec![0u8; bdev.sector_size() as usize];
+//! // Zero-copy read/write with DMA buffers.
+//! // let mut buf = spdk_env::DmaBuffer::new(bdev.sector_size() as usize, bdev.sector_size() as usize).unwrap();
 //! // bdev.read_blocks(0, &mut buf).unwrap();
 //! ```
 
@@ -47,7 +47,7 @@ pub use error::BlockDeviceError;
 
 use component_framework::{define_component, define_interface};
 use example_logger::ILogger;
-use spdk_env::ISPDKEnv;
+use spdk_env::{DmaBuffer, ISPDKEnv};
 use std::sync::Mutex;
 
 /// Type alias for the internal device state. Use [`default_device_state()`]
@@ -67,15 +67,15 @@ define_interface! {
         /// that the SPDK environment has been initialized.
         fn open(&self) -> Result<(), BlockDeviceError>;
 
-        /// Read sectors starting at `lba` into `buf`.
+        /// Read sectors starting at `lba` into a DMA buffer (zero-copy).
         ///
         /// `buf.len()` must be a positive multiple of [`sector_size()`].
-        fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError>;
+        fn read_blocks(&self, lba: u64, buf: &mut DmaBuffer) -> Result<(), BlockDeviceError>;
 
-        /// Write sectors starting at `lba` from `buf`.
+        /// Write sectors starting at `lba` from a DMA buffer (zero-copy).
         ///
         /// `buf.len()` must be a positive multiple of [`sector_size()`].
-        fn write_blocks(&self, lba: u64, buf: &[u8]) -> Result<(), BlockDeviceError>;
+        fn write_blocks(&self, lba: u64, buf: &DmaBuffer) -> Result<(), BlockDeviceError>;
 
         /// Close the block device: free the I/O queue pair and detach the controller.
         fn close(&self) -> Result<(), BlockDeviceError>;
@@ -129,7 +129,7 @@ impl IBlockDevice for SimpleBlockDevice {
         Ok(())
     }
 
-    fn read_blocks(&self, lba: u64, buf: &mut [u8]) -> Result<(), BlockDeviceError> {
+    fn read_blocks(&self, lba: u64, buf: &mut DmaBuffer) -> Result<(), BlockDeviceError> {
         let guard = self.inner.lock().expect("inner lock poisoned");
         let state = guard
             .as_ref()
@@ -137,7 +137,7 @@ impl IBlockDevice for SimpleBlockDevice {
         io::read_blocks(state, lba, buf)
     }
 
-    fn write_blocks(&self, lba: u64, buf: &[u8]) -> Result<(), BlockDeviceError> {
+    fn write_blocks(&self, lba: u64, buf: &DmaBuffer) -> Result<(), BlockDeviceError> {
         let guard = self.inner.lock().expect("inner lock poisoned");
         let state = guard
             .as_ref()
@@ -283,31 +283,7 @@ mod tests {
         ));
     }
 
-    // --- read/write/close when not open ---
-
-    #[test]
-    fn read_fails_when_not_open() {
-        let comp = make_component();
-        let mut buf = vec![0u8; 512];
-        let result = comp.read_blocks(0, &mut buf);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            BlockDeviceError::NotOpen(_)
-        ));
-    }
-
-    #[test]
-    fn write_fails_when_not_open() {
-        let comp = make_component();
-        let buf = vec![0u8; 512];
-        let result = comp.write_blocks(0, &buf);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            BlockDeviceError::NotOpen(_)
-        ));
-    }
+    // --- close when not open ---
 
     #[test]
     fn close_fails_when_not_open() {

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the `spdk-simple-block-device` component of the **Certus** project. It provides synchronous block I/O over SPDK's user-space NVMe driver, exposed as a component-framework interface (`IBlockDevice`).
+This is the `spdk-simple-block-device` component of the **Certus** project. It provides synchronous, zero-copy block I/O over SPDK's user-space NVMe driver, exposed both as a component-framework interface (`IBlockDevice`) and as an actor-based client (`BlockDeviceClient`).
 
-The component probes the first NVMe controller on the local PCIe bus, opens namespace 1, and wraps SPDK's async submit+poll NVMe commands into synchronous `read_blocks`/`write_blocks` calls with automatic DMA buffer management.
+The component probes the first NVMe controller on the local PCIe bus, opens namespace 1, and wraps SPDK's async submit+poll NVMe commands into synchronous `read_blocks`/`write_blocks` calls. Callers provide `DmaBuffer` (hugepage-backed) memory directly — no intermediate copies.
 
 ## Build Commands
 
@@ -17,9 +17,10 @@ cargo clippy -p spdk-simple-block-device -- -D warnings  # Lint
 cargo doc -p spdk-simple-block-device --no-deps   # Docs
 ```
 
-The `basic_io` example requires real NVMe hardware bound to vfio-pci with hugepages:
+Examples require real NVMe hardware bound to vfio-pci with hugepages:
 ```bash
-cargo run --example basic_io
+cargo run --example basic_io    # Component-based (IBlockDevice)
+cargo run --example actor_io    # Actor-based (BlockDeviceClient)
 ```
 
 ## Architecture
@@ -29,30 +30,34 @@ cargo run --example basic_io
 ```
 spdk-sys          (raw FFI: env.h + nvme.h bindings via bindgen)
     |
-spdk-env          (safe wrapper: ISPDKEnv init, VFIO checks, device enum)
+spdk-env          (safe wrapper: ISPDKEnv init, VFIO checks, device enum, DmaBuffer)
     |
-spdk-simple-block-device  (this crate: IBlockDevice sync read/write)
+spdk-simple-block-device  (this crate: IBlockDevice + actor-based BlockDeviceClient)
 ```
 
 ### Key Files
 
-- `src/lib.rs` — `IBlockDevice` interface and `SimpleBlockDevice` component definition. Receptacles: `spdk_env: ISPDKEnv`, `logger: ILogger`.
-- `src/io.rs` — Internal NVMe operations (`do_open`, `do_close`, `do_read`, `do_write`). Contains the synchronous I/O pattern: submit NVMe command with completion callback, then busy-poll `spdk_nvme_qpair_process_completions`.
-- `src/error.rs` — `BlockDeviceError` enum with all error variants.
-- `examples/basic_io.rs` — Full wiring example: logger -> env -> block device -> write/read/verify.
+- `src/lib.rs` — `IBlockDevice` interface and `SimpleBlockDevice` component. Receptacles: `spdk_env: ISPDKEnv`, `logger: ILogger`.
+- `src/actor.rs` — Actor-based API: `BlockDeviceHandler` (processes NVMe I/O on a dedicated thread), `BlockIoRequest` message enum, `BlockDeviceClient` (synchronous client).
+- `src/io.rs` — Standalone NVMe operations: `open_device`, `close_device`, `read_blocks`, `write_blocks`. Used by both the component and actor paths.
+- `src/error.rs` — `BlockDeviceError` enum.
+- `examples/basic_io.rs` — Component-based wiring example.
+- `examples/actor_io.rs` — Actor-based example with buffer reuse.
 
-### Synchronous I/O Pattern
+### Zero-Copy I/O
 
-SPDK NVMe is async (submit + poll). This crate wraps it synchronously:
-1. Allocate DMA buffer via `spdk_dma_zmalloc`
-2. Copy user data in (write) or prepare empty buffer (read)
-3. Submit `spdk_nvme_ns_cmd_{read,write}` with a callback that sets an `AtomicBool`
-4. Busy-poll `spdk_nvme_qpair_process_completions` until done
-5. Copy data out (read) and free DMA buffer
+Callers allocate `DmaBuffer` (from `spdk_env`) — hugepage-backed memory via `spdk_dma_zmalloc`. This buffer is passed directly to SPDK NVMe commands. No intermediate copies:
+1. Caller allocates `DmaBuffer::new(size, align)`
+2. Fills it (write) or leaves empty (read)
+3. Passes to `read_blocks` / `write_blocks` — NVMe device reads/writes directly
+4. Buffer returned to caller for reuse
+
+In the actor path, the `DmaBuffer` transfers ownership through the channel to the actor thread and back — still zero-copy.
 
 ### Thread Safety
 
-Raw SPDK pointers are stored in `Mutex<Option<InnerState>>`. The Mutex ensures the SPDK single-thread-per-qpair requirement is met.
+- **Component path**: `Mutex<Option<InnerState>>` serializes access to the qpair.
+- **Actor path**: Dedicated actor thread owns the qpair exclusively. `DmaBuffer` is `Send`, so it transfers safely through channels.
 
 ## SPDK Prerequisites
 

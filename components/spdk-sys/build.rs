@@ -4,12 +4,27 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Locate the SPDK build directory relative to the workspace root.
+    // Locate the SPDK source and build directories relative to the workspace root.
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let spdk_build = manifest_dir.join("../../deps/spdk-build");
-    let spdk_build = spdk_build.canonicalize().expect(
-        "SPDK build directory not found at deps/spdk-build/. Run deps/build_spdk.sh first.",
-    );
+    let deps_dir = manifest_dir.join("../../deps");
+
+    let spdk_src = deps_dir.join("spdk");
+    if !spdk_src.exists() {
+        panic!(
+            "\n\nerror: SPDK source not found at deps/spdk/.\n\
+             Clone it first:  git submodule update --init deps/spdk\n\
+             Then build it:   deps/build_spdk.sh\n\n"
+        );
+    }
+
+    let spdk_build = deps_dir.join("spdk-build");
+    let spdk_build = spdk_build.canonicalize().unwrap_or_else(|_| {
+        panic!(
+            "\n\nerror: SPDK build directory not found at deps/spdk-build/.\n\
+             SPDK source exists at deps/spdk/ but has not been built yet.\n\
+             Run:  deps/build_spdk.sh\n\n"
+        );
+    });
 
     let include_dir = spdk_build.join("include");
     let lib_dir = spdk_build.join("lib");

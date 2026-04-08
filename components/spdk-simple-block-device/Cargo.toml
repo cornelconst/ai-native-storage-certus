@@ -23,3 +23,7 @@ path = "examples/basic_io.rs"
 [[example]]
 name = "actor_io"
 path = "examples/actor_io.rs"
+
+[[example]]
+name = "iops_bench"
+path = "examples/iops_bench.rs"
