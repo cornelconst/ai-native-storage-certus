@@ -2,6 +2,117 @@
 
 Certus is a generative domain-specific filesystem for inferencing workloads. The implementation is based on the integration of components that somewhat supports a paradigm of **independent extensibilty** - that is, components can be developed separately and later integrated into the final solution.  This approach also helps to reduce the required LLM context window by limiting it to the component being developed and other components it must bind to (note: components should have low coupling and only bind to a few other components).
 
+## Quick Start
+
+### Prerequisites
+
+- Rust toolchain (edition 2021, MSRV 1.75)
+- Linux (tested on RHEL/Fedora)
+
+### Building without SPDK
+
+The SPDK crates (`spdk-sys`, `spdk-env`, `spdk-simple-block-device`) are excluded from
+the default workspace members, so a plain `cargo build` works without any SPDK dependencies:
+
+```bash
+cargo build            # Build default (non-SPDK) workspace members
+```
+
+### Building with SPDK
+
+To build the SPDK-dependent crates you must first build and install SPDK:
+
+```bash
+# 1. Install system dependencies (requires sudo, RHEL/Fedora)
+deps/install_deps.sh
+
+# 2. Install Python build dependencies
+pip install -r deps/requirements.txt
+
+# 3. Clone, build, and install SPDK to deps/spdk-build/
+deps/build_spdk.sh
+```
+
+Then build individual SPDK crates explicitly:
+
+```bash
+cargo build -p spdk-sys
+cargo build -p spdk-env
+cargo build -p spdk-simple-block-device
+```
+
+Or build everything (default + SPDK members) at once:
+
+```bash
+cargo build --workspace
+```
+
+### Running Tests
+
+```bash
+# Run tests for default (non-SPDK) crates
+cargo test --all
+
+# Run tests for a specific SPDK crate (requires SPDK built)
+cargo test -p spdk-sys
+cargo test -p spdk-env
+cargo test -p spdk-simple-block-device
+```
+
+### Running Benchmarks
+
+Benchmarks use [Criterion](https://github.com/bheisler/criterion.rs) and live in
+`components/component-framework/crates/component-framework/benches/`.
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run a specific benchmark suite
+cargo bench --bench channel_spsc_benchmark
+cargo bench --bench channel_mpsc_benchmark
+cargo bench --bench channel_latency_benchmark
+cargo bench --bench numa_latency_benchmark
+cargo bench --bench numa_throughput_benchmark
+```
+
+After a run, open the Criterion HTML report:
+
+```bash
+firefox --no-remote components/component-framework/crates/component-framework/target/criterion/report/index.html
+```
+
+### Running Examples
+
+Component-framework examples:
+
+```bash
+cargo run --example basic
+cargo run --example wiring
+cargo run --example introspection
+cargo run --example binding
+cargo run --example actor_ping_pong
+cargo run --example actor_pipeline
+cargo run --example actor_fan_in
+cargo run --example actor_log
+cargo run --example numa_pinning
+```
+
+SPDK block-device examples (require real NVMe hardware bound to `vfio-pci` with hugepages configured):
+
+```bash
+# Bind NVMe devices to vfio-pci
+sudo deps/spdk/scripts/setup.sh
+
+# Allocate hugepages
+sudo sh -c 'echo 1024 > /proc/sys/vm/nr_hugepages'
+
+# Run examples
+cargo run -p spdk-simple-block-device --example basic_io     # Component-based I/O
+cargo run -p spdk-simple-block-device --example actor_io      # Actor-based I/O
+cargo run -p spdk-simple-block-device --example iops_bench    # IOPS benchmark
+```
+
 ## Component Framework
 
 The core infrastructure is a Rust component framework inspired by COM (Component Object Model) principles.
