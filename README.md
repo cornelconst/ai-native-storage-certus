@@ -14,6 +14,19 @@ Certus is a generative domain-specific filesystem for inferencing workloads. The
   ```
   Log out and back in after making this change for it to take effect.
 
+  
+- Kernel boot parameters for IOMMU and hugepages must be configured (one-time setup, requires reboot):
+  ```bash
+  # For Intel:
+  components/spdk-env/scripts/add_kernel_options.sh
+  # This runs: grubby --update-kernel=ALL --args="intel_iommu=on iommu=pt default_hugepagesz=1G hugepagesz=1G hugepages=4"
+  ```
+  **AMD architectures** require `amd_iommu=on` instead of `intel_iommu=on`:
+  ```bash
+  grubby --update-kernel=ALL --args="amd_iommu=on iommu=pt default_hugepagesz=1G hugepagesz=1G hugepages=4"
+  ```
+  Reboot after applying kernel parameter changes.
+
 ### Building without SPDK
 
 The SPDK crates (`spdk-sys`, `spdk-env`, `spdk-simple-block-device`) are excluded from
