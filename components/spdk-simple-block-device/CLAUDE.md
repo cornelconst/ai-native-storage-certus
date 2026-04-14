@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is the `spdk-simple-block-device` component of the **Certus** project. It provides synchronous, zero-copy block I/O over SPDK's user-space NVMe driver, exposed both as a component-framework interface (`IBlockDevice`) and as an actor-based client (`BlockDeviceClient`).
+This is the `spdk-simple-block-device` component of the **Certus** project. It provides synchronous, zero-copy block I/O over SPDK's user-space NVMe driver, exposed both as a component-framework interface (`IBasicBlockDevice`) and as an actor-based client (`BlockDeviceClient`).
 
 The component probes the first NVMe controller on the local PCIe bus, opens namespace 1, and wraps SPDK's async submit+poll NVMe commands into synchronous `read_blocks`/`write_blocks` calls. Callers provide `DmaBuffer` (hugepage-backed) memory directly — no intermediate copies.
 
@@ -19,7 +19,7 @@ cargo doc -p spdk-simple-block-device --no-deps   # Docs
 
 Examples require real NVMe hardware bound to vfio-pci with hugepages:
 ```bash
-cargo run --example basic_io    # Component-based (IBlockDevice)
+cargo run --example basic_io    # Component-based (IBasicBlockDevice)
 cargo run --example actor_io    # Actor-based (BlockDeviceClient)
 ```
 
@@ -32,12 +32,12 @@ spdk-sys          (raw FFI: env.h + nvme.h bindings via bindgen)
     |
 spdk-env          (safe wrapper: ISPDKEnv init, VFIO checks, device enum, DmaBuffer)
     |
-spdk-simple-block-device  (this crate: IBlockDevice + actor-based BlockDeviceClient)
+spdk-simple-block-device  (this crate: IBasicBlockDevice + actor-based BlockDeviceClient)
 ```
 
 ### Key Files
 
-- `src/lib.rs` — `IBlockDevice` interface and `SimpleBlockDevice` component. Receptacles: `spdk_env: ISPDKEnv`, `logger: ILogger`.
+- `src/lib.rs` — `IBasicBlockDevice` interface and `SimpleBlockDevice` component. Receptacles: `spdk_env: ISPDKEnv`, `logger: ILogger`.
 - `src/actor.rs` — Actor-based API: `BlockDeviceHandler` (processes NVMe I/O on a dedicated thread), `BlockIoRequest` message enum, `BlockDeviceClient` (synchronous client).
 - `src/io.rs` — Standalone NVMe operations: `open_device`, `close_device`, `read_blocks`, `write_blocks`. Used by both the component and actor paths.
 - `src/error.rs` — `BlockDeviceError` enum.
