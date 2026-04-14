@@ -1,6 +1,6 @@
 //! Simple NVMe block device component for the Certus system.
 //!
-//! Provides [`IBlockDevice`], a component interface for synchronous block I/O
+//! Provides [`IBasicBlockDevice`], a component interface for synchronous block I/O
 //! over SPDK's NVMe driver. The component probes the first NVMe controller on
 //! the local PCIe bus, opens namespace 1, and exposes read/write at LBA
 //! granularity.
@@ -8,13 +8,13 @@
 //! # Prerequisites
 //!
 //! - The SPDK environment must be initialized via [`spdk_env::ISPDKEnv`] before
-//!   calling [`IBlockDevice::open`].
+//!   calling [`IBasicBlockDevice::open`].
 //! - NVMe devices must be bound to `vfio-pci` and hugepages must be configured.
 //!
 //! # Usage
 //!
 //! ```ignore
-//! use spdk_simple_block_device::{IBlockDevice, SimpleBlockDevice};
+//! use spdk_simple_block_device::{IBasicBlockDevice, SimpleBlockDevice};
 //! use spdk_env::{ISPDKEnv, SPDKEnvComponent};
 //! use example_logger::{ILogger, LoggerComponent};
 //! use component_framework::prelude::*;
@@ -60,7 +60,7 @@ pub fn default_device_state() -> DeviceState {
 }
 
 define_interface! {
-    pub IBlockDevice {
+    pub IBasicBlockDevice {
         /// Open the block device: probe NVMe, attach controller, open namespace 1.
         ///
         /// Requires that `spdk_env` and `logger` receptacles are connected, and
@@ -94,7 +94,7 @@ define_interface! {
 define_component! {
     pub SimpleBlockDevice {
         version: "0.1.0",
-        provides: [IBlockDevice],
+        provides: [IBasicBlockDevice],
         receptacles: {
             spdk_env: ISPDKEnv,
             logger: ILogger,
@@ -105,7 +105,7 @@ define_component! {
     }
 }
 
-impl IBlockDevice for SimpleBlockDevice {
+impl IBasicBlockDevice for SimpleBlockDevice {
     fn open(&self) -> Result<(), BlockDeviceError> {
         if !self.logger.is_connected() {
             return Err(BlockDeviceError::LoggerNotConnected(
@@ -230,12 +230,12 @@ mod tests {
         assert_eq!(comp.version(), "0.1.0");
     }
 
-    // --- IBlockDevice interface query ---
+    // --- IBasicBlockDevice interface query ---
 
     #[test]
     fn component_provides_iblock_device() {
         let comp = make_component();
-        let iface = query::<dyn IBlockDevice + Send + Sync>(&*comp);
+        let iface = query::<dyn IBasicBlockDevice + Send + Sync>(&*comp);
         assert!(iface.is_some());
     }
 

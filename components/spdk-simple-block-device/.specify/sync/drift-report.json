@@ -1,0 +1,89 @@
+{
+  "generated": "2026-04-14T00:00:00Z",
+  "project": "spdk-simple-block-device",
+  "summary": {
+    "specs_analyzed": 0,
+    "requirements_checked": 0,
+    "aligned": 0,
+    "drifted": 0,
+    "not_implemented": 0,
+    "unspecced_features": 8
+  },
+  "specs": [],
+  "unspecced": [
+    {
+      "feature": "IBasicBlockDevice interface (component path)",
+      "location": "src/lib.rs",
+      "lines": 185,
+      "suggested_spec": "spec-001-basic-block-device",
+      "inferred_requirements": [
+        "IR-001: open() must probe NVMe, attach first controller, open NS 1",
+        "IR-002: read_blocks(lba, buf) must perform zero-copy read via DMA buffer",
+        "IR-003: write_blocks(lba, buf) must perform zero-copy write via DMA buffer",
+        "IR-004: close() must free qpair and detach controller",
+        "IR-005: sector_size() must return sector size in bytes, 0 if not open",
+        "IR-006: num_sectors() must return total sectors, 0 if not open",
+        "IR-007: is_open() must report open/closed state",
+        "IR-008: Buffer length must be a positive multiple of sector size",
+        "IR-009: open() must fail with LoggerNotConnected if logger not wired",
+        "IR-010: open() must fail with EnvNotInitialized if spdk_env not wired",
+        "IR-011: open() must fail with AlreadyOpen if already open",
+        "IR-012: close() must fail with NotOpen if not open",
+        "IR-013: Drop must clean up if device still open",
+        "IR-014: Component must provide IBasicBlockDevice via query"
+      ]
+    },
+    {
+      "feature": "Low-level NVMe I/O operations",
+      "location": "src/io.rs",
+      "lines": 490,
+      "suggested_spec": "spec-002-nvme-io-operations"
+    },
+    {
+      "feature": "Actor-based block device (handler + client)",
+      "location": "src/actor.rs",
+      "lines": 353,
+      "suggested_spec": "spec-003-actor-block-device",
+      "inferred_requirements": [
+        "IR-015: Actor path must satisfy single-thread-per-qpair invariant",
+        "IR-016: Actor on_stop must close device if still open"
+      ]
+    },
+    {
+      "feature": "Error types",
+      "location": "src/error.rs",
+      "lines": 193,
+      "suggested_spec": "spec-001-basic-block-device"
+    },
+    {
+      "feature": "Multi-qpair support (alloc_qpair, free_qpair)",
+      "location": "src/io.rs:280-317",
+      "lines": 38,
+      "suggested_spec": "spec-004-multi-qpair"
+    },
+    {
+      "feature": "Async I/O primitives (submit_read, submit_write, poll_completions)",
+      "location": "src/io.rs:322-416",
+      "lines": 95,
+      "suggested_spec": "spec-005-async-io"
+    },
+    {
+      "feature": "IOPS benchmark example",
+      "location": "examples/iops_bench.rs",
+      "lines": 372,
+      "suggested_spec": "spec-006-iops-benchmark"
+    },
+    {
+      "feature": "Basic I/O and Actor I/O examples",
+      "location": "examples/",
+      "lines": 314,
+      "suggested_spec": null
+    }
+  ],
+  "conflicts": [],
+  "notes": {
+    "duplicate_interface_definition": "IBasicBlockDevice is defined in both components/interfaces/src/iblock_device.rs and src/lib.rs via define_interface! macro. Both copies appear identical but have no formal synchronization mechanism.",
+    "constitution_status": "Default template — unfilled",
+    "test_coverage": "Unit tests cover component construction, receptacle wiring, pre-flight error conditions, and Drop safety. No integration tests (require real NVMe hardware)."
+  }
+}

@@ -16,7 +16,7 @@
 use component_framework::iunknown::query;
 use example_logger::{ILogger, LoggerComponent};
 use spdk_env::{DmaBuffer, ISPDKEnv, SPDKEnvComponent};
-use spdk_simple_block_device::{default_device_state, IBlockDevice, SimpleBlockDevice};
+use spdk_simple_block_device::{default_device_state, IBasicBlockDevice, SimpleBlockDevice};
 use std::sync::atomic::AtomicBool;
 use std::sync::RwLock;
 

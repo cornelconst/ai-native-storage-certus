@@ -1,50 +1,95 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+# SPDK Simple Block Device Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. Zero-Copy I/O First
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+All data-path operations MUST use zero-copy semantics. Callers provide
+`DmaBuffer` (hugepage-backed) memory directly to NVMe commands — no
+intermediate copies are permitted on the I/O path.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+- Read and write operations MUST accept caller-allocated `DmaBuffer`
+  references and pass them directly to SPDK NVMe commands.
+- The actor path MUST transfer `DmaBuffer` ownership through channels
+  without copying buffer contents.
+- Any new I/O path MUST preserve the zero-copy guarantee.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### II. Unsafe-but-Sound FFI
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+All interactions with SPDK's C API use `unsafe` blocks that MUST be
+demonstrably sound.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+- Every `unsafe` block MUST have a `// SAFETY:` comment explaining why
+  the invariants are upheld.
+- Raw pointer lifetimes MUST be clearly bounded: between `open_device`
+  and `close_device` for device pointers, between submit and completion
+  for callback context pointers.
+- `Send` implementations on types containing raw pointers MUST be
+  justified with a safety argument about thread ownership.
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+### III. Single-Thread-per-Qpair
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+SPDK requires that each I/O queue pair is accessed from exactly one
+thread. This invariant MUST be enforced architecturally.
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+- The component path MUST serialize qpair access with a `Mutex`.
+- The actor path MUST confine all qpair operations to the actor's
+  dedicated thread.
+- Multi-qpair code MUST allocate one qpair per worker thread with no
+  cross-thread sharing of qpair pointers.
+- New I/O paths MUST document how they satisfy this invariant.
+
+### IV. Explicit Lifecycle Management
+
+Device resources (controllers, queue pairs, namespaces) have explicit
+open/close lifecycles that MUST be respected.
+
+- `open()` MUST validate all prerequisites (env initialized, receptacles
+  connected) before acquiring hardware resources.
+- `close()` MUST release all hardware resources (free qpair, detach
+  controller) in the correct order.
+- `Drop` MUST clean up if the caller forgets to call `close()`, logging
+  a warning.
+- Double-open and close-when-not-open MUST return clear errors, not
+  panic.
+
+### V. Comprehensive Error Reporting
+
+Every failure mode MUST be represented by a specific `BlockDeviceError`
+variant with an actionable message.
+
+- Error messages MUST tell the caller what to do (e.g., "Call
+  ISPDKEnv::init() first" rather than "env not ready").
+- New error conditions MUST get a dedicated variant; reusing generic
+  variants is not permitted.
+- All error variants MUST implement `Display`, `Debug`, `Clone`, and
+  `std::error::Error`.
+
+## Platform and Toolchain Constraints
+
+- **Target OS**: Linux only. SPDK and VFIO are Linux-specific.
+- **Language**: Rust (stable toolchain).
+- **Hardware**: Requires NVMe device(s) bound to `vfio-pci` and
+  configured hugepages for any code that calls `open()`.
+- **Dependencies**: `spdk-sys` (FFI bindings), `spdk-env` (safe SPDK
+  wrapper), `component-framework` (COM-style component model),
+  `example-logger` (logging interface).
+- **CI gate**: `cargo clippy -- -D warnings && cargo test` MUST pass.
+  Integration tests requiring hardware run manually.
+
+## Development Workflow
+
+- Unit tests MUST cover all error paths and pre-flight validation (no
+  hardware needed).
+- Integration tests (requiring real NVMe) are in `examples/` and run
+  manually with hardware present.
+- New public APIs MUST have doc comments with usage examples.
+- Changes to the `IBasicBlockDevice` interface MUST be reflected in both
+  the local `define_interface!` and the `interfaces` crate definition.
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+- This constitution supersedes ad-hoc conventions for this crate.
+- Amendments require a version bump and review.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.0 | **Ratified**: 2026-04-14 | **Last Amended**: 2026-04-14

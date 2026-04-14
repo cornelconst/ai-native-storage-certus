@@ -1,7 +1,7 @@
 //! Centralized interface trait definitions for the Certus component system.
 //!
 //! This crate defines all component interface traits (`ILogger`, `IGreeter`,
-//! `ISPDKEnv`, `IBlockDevice`) in one place, allowing components to depend on
+//! `ISPDKEnv`, `IBasicBlockDevice`) in one place, allowing components to depend on
 //! interface definitions without pulling in implementation crates.
 //!
 //! SPDK-dependent interfaces and types are gated behind the `spdk` Cargo feature.
@@ -19,7 +19,7 @@ pub mod spdk_types;
 mod ispdk_env;
 
 #[cfg(feature = "spdk")]
-mod iblock_device;
+mod iblock_device_simple;
 
 #[cfg(feature = "spdk")]
 pub use spdk_types::{
@@ -30,4 +30,4 @@ pub use spdk_types::{
 pub use ispdk_env::ISPDKEnv;
 
 #[cfg(feature = "spdk")]
-pub use iblock_device::IBlockDevice;
+pub use iblock_device_simple::IBasicBlockDevice;
