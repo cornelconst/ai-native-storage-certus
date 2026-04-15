@@ -1,0 +1,125 @@
+{
+  "generated": "2026-04-14T00:00:00Z",
+  "project": "block-device-spdk-nvme v1",
+  "summary": {
+    "specs_analyzed": 1,
+    "requirements_checked": 28,
+    "aligned": 18,
+    "drifted": 10,
+    "not_implemented": 0,
+    "unspecced_features": 2
+  },
+  "specs": [
+    {
+      "id": "001-spdk-nvme-block-device",
+      "title": "SPDK NVMe Block Device Component",
+      "aligned": [
+        "FR-001",
+        "FR-002",
+        "FR-007",
+        "FR-010",
+        "FR-012",
+        "FR-013",
+        "FR-014",
+        "FR-015",
+        "FR-016",
+        "FR-017",
+        "FR-018",
+        "FR-020",
+        "SC-001",
+        "SC-003",
+        "SC-005",
+        "SC-007",
+        "SC-008"
+      ],
+      "drifted": [
+        {
+          "requirement": "FR-003",
+          "spec_text": "System MUST support synchronous read and write operations with parameters for NVMe namespace id, DmaBuffer, LBA offset, and timeout.",
+          "actual": "ReadSync and WriteSync commands have ns_id, lba, and buf parameters but no timeout field.",
+          "location": "interfaces/src/iblock_device.rs:186-203",
+          "severity": "minor"
+        },
+        {
+          "requirement": "FR-004",
+          "spec_text": "System MUST support asynchronous read and write operations with a timeout value; operations exceeding timeout MUST return an error.",
+          "actual": "ReadAsync and WriteAsync exist with timeout_ms but execute synchronously. Pending ops are inserted and immediately removed; timeout tracking never fires.",
+          "location": "src/actor.rs:194-250",
+          "severity": "major"
+        },
+        {
+          "requirement": "FR-005",
+          "spec_text": "System MUST support aborting an in-flight asynchronous operation identified by its component-assigned operation handle.",
+          "actual": "AbortOp handler exists but is ineffective because async ops complete synchronously and pending ops are immediately removed.",
+          "location": "src/actor.rs:282-287",
+          "severity": "major"
+        },
+        {
+          "requirement": "FR-006",
+          "spec_text": "System MUST support a write-zeros operation.",
+          "actual": "do_write_zeros() returns NvmeBlockError::NotSupported.",
+          "location": "src/actor.rs:492-504",
+          "severity": "moderate"
+        },
+        {
+          "requirement": "FR-008",
+          "spec_text": "System MUST support probing, creating, formatting, and deleting NVMe namespaces.",
+          "actual": "Only NsProbe works. create(), format(), and delete() return NvmeBlockError::NotSupported due to missing SPDK bindings.",
+          "location": "src/namespace.rs:71-110",
+          "severity": "moderate"
+        },
+        {
+          "requirement": "FR-009",
+          "spec_text": "System MUST support controller hardware reset with graceful handling of in-flight operations.",
+          "actual": "ControllerReset cancels pending ops but returns NotSupported for the actual reset.",
+          "location": "src/actor.rs:341-357",
+          "severity": "moderate"
+        },
+        {
+          "requirement": "FR-011",
+          "spec_text": "When compiled with the telemetry feature, system MUST collect and expose min/max/mean IO latencies, total operation count, and mean throughput.",
+          "actual": "TelemetryStats infrastructure exists but record() is never called from the IO dispatch path. Statistics are always zero.",
+          "location": "src/actor.rs:163-170, src/telemetry.rs:42-72",
+          "severity": "major"
+        },
+        {
+          "requirement": "FR-019",
+          "spec_text": "When a client disconnects, the component MUST cancel all in-flight operations and silently discard any pending completions.",
+          "actual": "Disconnect requires explicit ControlMessage::DisconnectClient; auto-detection of channel drop not implemented. Handler sends error completions rather than silently discarding.",
+          "location": "src/actor.rs:528-541",
+          "severity": "moderate"
+        },
+        {
+          "requirement": "SC-002",
+          "spec_text": "Asynchronous operations that exceed their specified timeout are reported as errors within a bounded margin.",
+          "actual": "Async ops complete synchronously; timeout never fires (depends on FR-004).",
+          "location": "src/actor.rs:194-250",
+          "severity": "major"
+        },
+        {
+          "requirement": "SC-004",
+          "spec_text": "The component correctly handles all namespace management lifecycle operations (probe, create, format, delete).",
+          "actual": "Only probe works; create/format/delete return NotSupported (depends on FR-008).",
+          "location": "src/namespace.rs:71-110",
+          "severity": "moderate"
+        }
+      ],
+      "not_implemented": []
+    }
+  ],
+  "unspecced": [
+    {
+      "feature": "flush_io()",
+      "location": "src/lib.rs:322-333",
+      "lines": 12,
+      "suggested_spec": "Document in FR-001/FR-002 client API contract"
+    },
+    {
+      "feature": "ControllerSnapshot",
+      "location": "src/lib.rs:110-128",
+      "lines": 19,
+      "suggested_spec": "Internal optimization; no spec change needed"
+    }
+  ],
+  "conflicts": []
+}
