@@ -59,7 +59,7 @@ impl std::error::Error for SpdkEnvError {}
 // BlockDeviceError
 // ---------------------------------------------------------------------------
 
-/// Error conditions reported by the simple block device component.
+/// Error conditions reported by block device components.
 ///
 /// Each variant carries a descriptive message with actionable guidance.
 #[derive(Debug, Clone)]
@@ -218,11 +218,7 @@ impl DmaBuffer {
     /// When `None`, SPDK chooses any available node.
     ///
     /// The SPDK environment must be initialized before calling this.
-    pub fn new(
-        size: usize,
-        align: usize,
-        numa_node: Option<i32>,
-    ) -> Result<Self, SpdkEnvError> {
+    pub fn new(size: usize, align: usize, numa_node: Option<i32>) -> Result<Self, SpdkEnvError> {
         if size == 0 {
             return Err(SpdkEnvError::DmaAllocationFailed(
                 "DmaBuffer size must be > 0".into(),
@@ -238,21 +234,13 @@ impl DmaBuffer {
                 // SAFETY: spdk_zmalloc returns hugepage-backed memory or NULL.
                 const SPDK_MALLOC_DMA: u32 = 0x01;
                 let p = unsafe {
-                    spdk_sys::spdk_zmalloc(
-                        size,
-                        align,
-                        std::ptr::null_mut(),
-                        id,
-                        SPDK_MALLOC_DMA,
-                    )
+                    spdk_sys::spdk_zmalloc(size, align, std::ptr::null_mut(), id, SPDK_MALLOC_DMA)
                 };
                 (p, spdk_sys::spdk_free as _, id)
             }
             None => {
                 // SAFETY: spdk_dma_zmalloc returns hugepage-backed memory or NULL.
-                let p = unsafe {
-                    spdk_sys::spdk_dma_zmalloc(size, align, std::ptr::null_mut())
-                };
+                let p = unsafe { spdk_sys::spdk_dma_zmalloc(size, align, std::ptr::null_mut()) };
                 (p, spdk_sys::spdk_dma_free as _, -1)
             }
         };
