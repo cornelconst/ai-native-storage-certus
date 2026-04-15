@@ -50,7 +50,7 @@ specify extension add spec-kit-async --from https://github.com/bgervin/spec-kit-
 
 ### Building without SPDK
 
-The SPDK crates (`spdk-sys`, `spdk-env`, `spdk-simple-block-device`) are excluded from
+The SPDK crates (`spdk-sys`, `spdk-env`, `block-device-spdk-nvme`) are excluded from
 the default workspace members, so a plain `cargo build` works without any SPDK dependencies:
 
 ```bash
@@ -77,7 +77,7 @@ Then build individual SPDK crates explicitly:
 ```bash
 cargo build -p spdk-sys
 cargo build -p spdk-env
-cargo build -p spdk-simple-block-device
+cargo build -p block-device-spdk-nvme
 ```
 
 Or build everything (default + SPDK members) at once:
@@ -95,7 +95,7 @@ cargo test --all
 # Run tests for a specific SPDK crate (requires SPDK built)
 cargo test -p spdk-sys
 cargo test -p spdk-env
-cargo test -p spdk-simple-block-device
+cargo test -p block-device-spdk-nvme
 ```
 
 ### Running Benchmarks
@@ -145,12 +145,29 @@ sudo deps/spdk/scripts/setup.sh
 
 # Allocate hugepages
 sudo sh -c 'echo 1024 > /proc/sys/vm/nr_hugepages'
-
-# Run examples
-cargo run -p spdk-simple-block-device --example basic_io     # Component-based I/O
-cargo run -p spdk-simple-block-device --example actor_io      # Actor-based I/O
-cargo run -p spdk-simple-block-device --example iops_bench    # IOPS benchmark
 ```
+
+### IOPS Benchmark
+
+An NVMe IOPS benchmark application that measures read/write IOPS, throughput (MB/s), and latency percentiles using the `block-device-spdk-nvme` component. Requires SPDK built and NVMe devices bound to VFIO/UIO.
+
+```bash
+# Build
+cargo build -p iops-benchmark --release
+
+# Run with defaults (4KB random reads, QD=32, 1 thread, 10s)
+sudo ./target/release/iops-benchmark
+
+# Custom workload
+sudo ./target/release/iops-benchmark \
+  --op write --block-size 65536 --queue-depth 64 \
+  --threads 4 --duration 30 --pattern sequential
+
+# Mixed read/write, quiet mode
+sudo ./target/release/iops-benchmark --op rw --quiet
+```
+
+See [apps/iops-benchmark/README.md](apps/iops-benchmark/README.md) for full CLI options and sample output.
 
 ## Component Framework
 

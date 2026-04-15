@@ -10,13 +10,14 @@ members = [
     "components/spdk-sys",
     "components/interfaces",
     "components/spdk-env",
-    "components/spdk-simple-block-device",
     "apps/helloworld-mainline",
+    "apps/iops-benchmark",
+    "components/block-device-spdk-nvme/v1",
 ]
 
 # SPDK crates require pre-built native libraries at deps/spdk-build/.
 # They are excluded from default builds so `cargo build` succeeds without
-# SPDK deps. Build them explicitly with: cargo build -p spdk-simple-block-device
+# SPDK deps. Build them explicitly with: cargo build -p block-device-spdk-nvme
 default-members = [
     "components/component-framework/crates/component-core",
     "components/component-framework/crates/component-macros",
@@ -43,5 +44,5 @@ example-helloworld = { path = "components/example-helloworld" }
 interfaces = { path = "components/interfaces" }
 spdk-sys = { path = "components/spdk-sys" }
 spdk-env = { path = "components/spdk-env" }
-spdk-simple-block-device = { path = "components/spdk-simple-block-device" }
+block-device-spdk-nvme = { path = "components/block-device-spdk-nvme/v1" }
 

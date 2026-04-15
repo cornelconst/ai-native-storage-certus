@@ -111,8 +111,7 @@ mod tests {
     fn make_wired_component() -> Arc<SPDKEnvComponent> {
         let comp = make_component();
         let logger = LoggerComponent::new();
-        let ilogger =
-            query::<dyn ILogger + Send + Sync>(&*logger).expect("ILogger not found");
+        let ilogger = query::<dyn ILogger + Send + Sync>(&*logger).expect("ILogger not found");
         comp.logger.connect(ilogger).expect("connect failed");
         comp
     }
@@ -159,8 +158,7 @@ mod tests {
     fn logger_receptacle_connect() {
         let comp = make_component();
         let logger = LoggerComponent::new();
-        let ilogger =
-            query::<dyn ILogger + Send + Sync>(&*logger).expect("ILogger not found");
+        let ilogger = query::<dyn ILogger + Send + Sync>(&*logger).expect("ILogger not found");
         assert!(comp.logger.connect(ilogger).is_ok());
         assert!(comp.logger.is_connected());
     }

@@ -49,8 +49,8 @@ pub fn check_vfio_permissions() -> Result<(), SpdkEnvError> {
 pub(crate) fn check_vfio_permissions_at(dev_vfio: &str) -> Result<(), SpdkEnvError> {
     let vfio_dir = Path::new(dev_vfio);
 
-    // Check the directory itself is accessible.
-    check_path_rw(vfio_dir)?;
+    // Check the directory is readable (we need to list entries, not write).
+    check_path_readable(vfio_dir)?;
 
     // Check the container device.
     let container = vfio_dir.join("vfio");
@@ -71,6 +71,42 @@ pub(crate) fn check_vfio_permissions_at(dev_vfio: &str) -> Result<(), SpdkEnvErr
     }
 
     Ok(())
+}
+
+/// Check that the current user has read access to a path (e.g. a directory).
+fn check_path_readable(path: &Path) -> Result<(), SpdkEnvError> {
+    let uid = unsafe { libc::getuid() };
+    let gid = unsafe { libc::getegid() };
+
+    match fs::metadata(path) {
+        Ok(meta) => {
+            let mode = meta.mode();
+            let file_uid = meta.uid();
+            let file_gid = meta.gid();
+
+            let has_access = if uid == file_uid {
+                mode & 0o400 == 0o400
+            } else if gid == file_gid {
+                mode & 0o040 == 0o040
+            } else {
+                mode & 0o004 == 0o004
+            };
+
+            if !has_access {
+                return Err(SpdkEnvError::PermissionDenied(format!(
+                    "{} (need read for uid={uid}, gid={gid}; current mode={mode:04o}, \
+                     owner={file_uid}:{file_gid}). Consider adding your user to the \
+                     appropriate group or configuring udev rules.",
+                    path.display()
+                )));
+            }
+            Ok(())
+        }
+        Err(e) => Err(SpdkEnvError::PermissionDenied(format!(
+            "cannot stat {}: {e}",
+            path.display()
+        ))),
+    }
 }
 
 /// Check that the current user has read+write access to a path.
