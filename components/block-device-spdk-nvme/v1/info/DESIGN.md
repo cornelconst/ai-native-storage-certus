@@ -1,6 +1,6 @@
 # "/speckit-specify @info/DESIGN.md"
 
-Component must be written in Rust and called block-device-spdk-nvme
+Component is called BlockDeviceSpdkNvmeComponentV1.  
 
 Component must use the components/component-framework as the basis for defining interfaces and receptacles etc.
 
