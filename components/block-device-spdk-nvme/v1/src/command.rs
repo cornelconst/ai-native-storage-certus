@@ -24,6 +24,4 @@ pub(crate) enum ControlMessage {
     ConnectClient { session: ClientSession },
     /// Remove a client by ID.
     DisconnectClient { client_id: u64 },
-    /// Wake the actor to poll client IO channels without any control action.
-    Poll,
 }

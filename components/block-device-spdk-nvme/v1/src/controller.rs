@@ -73,7 +73,8 @@ impl NvmeNamespaceInfo {
     /// };
     /// assert_eq!(ns.capacity_bytes(), 2048 * 4096);
     /// ```
-    pub fn capacity_bytes(&self) -> u64 {
+    #[allow(dead_code)]
+    pub(crate) fn capacity_bytes(&self) -> u64 {
         self.num_sectors * self.sector_size as u64
     }
 }
@@ -213,62 +214,62 @@ impl NvmeController {
     }
 
     /// Return a raw pointer to the underlying SPDK controller.
-    pub fn as_ptr(&self) -> *mut spdk_sys::spdk_nvme_ctrlr {
+    pub(crate) fn as_ptr(&self) -> *mut spdk_sys::spdk_nvme_ctrlr {
         self.ctrlr_ptr
     }
 
     /// NUMA node of the controller device.
-    pub fn numa_node(&self) -> i32 {
+    pub(crate) fn numa_node(&self) -> i32 {
         self.numa_node
     }
 
     /// NVMe specification version reported by the controller.
-    pub fn version(&self) -> NvmeVersion {
+    pub(crate) fn version(&self) -> NvmeVersion {
         self.version
     }
 
     /// Maximum data transfer size in bytes.
-    pub fn max_transfer_size(&self) -> u32 {
+    pub(crate) fn max_transfer_size(&self) -> u32 {
         self.max_transfer_size
     }
 
     /// Maximum IO queue depth supported.
-    pub fn max_queue_depth(&self) -> u32 {
+    pub(crate) fn max_queue_depth(&self) -> u32 {
         self.max_queue_depth
     }
 
     /// Number of IO queues on this controller.
-    pub fn num_io_queues(&self) -> u32 {
+    pub(crate) fn num_io_queues(&self) -> u32 {
         self.num_io_queues
     }
 
     /// Look up a namespace by ID.
     #[allow(dead_code)]
-    pub fn namespace(&self, ns_id: u32) -> Option<&NvmeNamespaceInfo> {
+    pub(crate) fn namespace(&self, ns_id: u32) -> Option<&NvmeNamespaceInfo> {
         self.namespaces.iter().find(|ns| ns.ns_id == ns_id)
     }
 
     /// Get the default namespace (first active), if any.
-    pub fn default_namespace(&self) -> Option<&NvmeNamespaceInfo> {
+    pub(crate) fn default_namespace(&self) -> Option<&NvmeNamespaceInfo> {
         self.namespaces.first()
     }
 
     /// Return sector size of the default namespace, or 512 as fallback.
-    pub fn sector_size(&self) -> u32 {
+    pub(crate) fn sector_size(&self) -> u32 {
         self.default_namespace()
             .map(|ns| ns.sector_size)
             .unwrap_or(512)
     }
 
     /// Return total sector count of the default namespace, or 0.
-    pub fn num_sectors(&self) -> u64 {
+    pub(crate) fn num_sectors(&self) -> u64 {
         self.default_namespace()
             .map(|ns| ns.num_sectors)
             .unwrap_or(0)
     }
 
     /// Refresh the namespace list by re-scanning the controller.
-    pub fn refresh_namespaces(&mut self) {
+    pub(crate) fn refresh_namespaces(&mut self) {
         self.namespaces = Self::discover_namespaces(self.ctrlr_ptr);
     }
 }

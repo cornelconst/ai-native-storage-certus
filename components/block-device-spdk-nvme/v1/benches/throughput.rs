@@ -14,7 +14,6 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use block_device_spdk_nvme::qpair::QueuePairPool;
 use block_device_spdk_nvme::Command;
 
 /// Benchmark batch command construction throughput.
@@ -40,28 +39,6 @@ fn batch_construction_throughput(c: &mut Criterion) {
                         })
                         .collect();
                     let _cmd = Command::BatchSubmit { ops };
-                });
-            },
-        );
-    }
-    group.finish();
-}
-
-/// Benchmark queue pair selection throughput with batch operations.
-///
-/// Measures how quickly the selection heuristic runs for batch workloads.
-fn qpair_selection_throughput(c: &mut Criterion) {
-    let pool = QueuePairPool::from_detached(&[4, 16, 64, 256]);
-
-    let mut group = c.benchmark_group("qpair_selection_throughput");
-    for &batch_size in &[1usize, 8, 32, 128] {
-        group.throughput(Throughput::Elements(batch_size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, &size| {
-                b.iter(|| {
-                    let _idx = pool.select_index(size);
                 });
             },
         );
@@ -111,13 +88,15 @@ fn batch_write_throughput(c: &mut Criterion) {
     }
 
     let spdk_addr = devices[0].address;
-    block_dev.set_pci_address(interfaces::PciAddress {
+    let admin = query::<dyn interfaces::IBlockDeviceAdmin + Send + Sync>(&*block_dev)
+        .expect("IBlockDeviceAdmin query");
+    admin.set_pci_address(interfaces::PciAddress {
         domain: spdk_addr.domain,
         bus: spdk_addr.bus,
         dev: spdk_addr.dev,
         func: spdk_addr.func,
     });
-    if let Err(e) = block_dev.initialize() {
+    if let Err(e) = admin.initialize() {
         eprintln!("batch_write_throughput: skipping — block device init failed: {e}");
         return;
     }
@@ -130,7 +109,6 @@ fn batch_write_throughput(c: &mut Criterion) {
         .command_tx
         .send(Command::NsProbe)
         .expect("send NsProbe");
-    block_dev.flush_io().expect("flush_io");
     let completion = channels.completion_rx.recv().expect("recv");
     let namespaces = match completion {
         block_device_spdk_nvme::Completion::NsProbeResult { namespaces } => namespaces,
@@ -175,7 +153,6 @@ fn batch_write_throughput(c: &mut Criterion) {
                     let batch = Command::BatchSubmit { ops };
 
                     channels.command_tx.send(batch).expect("send batch");
-                    block_dev.flush_io().expect("flush_io");
 
                     // Collect all completions.
                     for _ in 0..size {
@@ -197,7 +174,6 @@ fn batch_write_throughput(c: &mut Criterion) {
 criterion_group!(
     benches,
     batch_construction_throughput,
-    qpair_selection_throughput,
     batch_write_throughput,
 );
 criterion_main!(benches);

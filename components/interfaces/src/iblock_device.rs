@@ -423,6 +423,45 @@ define_interface! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// IBlockDeviceAdmin
+// ---------------------------------------------------------------------------
+
+// Administrative lifecycle/configuration API for block device components.
+define_interface! {
+    pub IBlockDeviceAdmin {
+        /// Set the PCI address of the controller to attach to.
+        fn set_pci_address(&self, addr: crate::spdk_types::PciAddress);
+
+        /// Initialize the component and start its actor thread.
+        fn initialize(&self) -> Result<(), NvmeBlockError>;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extent manager admin
+// ---------------------------------------------------------------------------
+
+/// Result returned by extent-manager `open()` after recovery.
+#[derive(Debug, Clone)]
+pub struct RecoveryResult {
+    pub extents_loaded: u64,
+    pub orphans_cleaned: u64,
+}
+
+define_interface! {
+    pub IExtentManagerAdmin {
+        /// Set the DMA allocator (test hook).
+        fn set_dma_alloc(&self, alloc: crate::spdk_types::DmaAllocFn);
+
+        /// Initialize a fresh extent manager on the device.
+        fn initialize(&self, sizes: Vec<u32>, slots: Vec<u32>, ns_id: u32) -> Result<(), NvmeBlockError>;
+
+        /// Open an existing extent manager and perform recovery.
+        fn open(&self, ns_id: u32) -> Result<RecoveryResult, NvmeBlockError>;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

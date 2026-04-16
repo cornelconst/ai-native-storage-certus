@@ -19,8 +19,11 @@ pub mod spdk_types;
 mod ispdk_env;
 
 #[cfg(feature = "spdk")]
-mod iblock_device;
+pub mod iblock_device;
+mod iextent_manager;
 
+#[cfg(feature = "spdk")]
+pub use spdk_types::DmaAllocFn;
 #[cfg(feature = "spdk")]
 pub use spdk_types::{BlockDeviceError, DmaBuffer, PciAddress, PciId, SpdkEnvError, VfioDevice};
 
@@ -32,3 +35,13 @@ pub use iblock_device::{
     ClientChannels, Command, Completion, IBlockDevice, NamespaceInfo, NvmeBlockError, OpHandle,
     TelemetrySnapshot,
 };
+
+#[cfg(feature = "spdk")]
+pub use iblock_device::IBlockDeviceAdmin;
+#[cfg(feature = "spdk")]
+pub use iblock_device::IExtentManagerAdmin;
+#[cfg(feature = "spdk")]
+pub use iblock_device::RecoveryResult;
+
+pub use iextent_manager::ExtentManagerError;
+pub use iextent_manager::IExtentManager;

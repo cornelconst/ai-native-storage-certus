@@ -4,9 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use interfaces::{
-    ClientChannels, Command, Completion, DmaBuffer, NamespaceInfo, NvmeBlockError,
-};
+use interfaces::{ClientChannels, Command, Completion, DmaBuffer, NamespaceInfo, NvmeBlockError};
 
 use crate::config::{BenchConfig, IoMode, OpType, Pattern};
 use crate::lba::{LbaGenerator, RandomLba, SequentialLba};
@@ -86,7 +84,7 @@ impl Worker {
     /// Run the IO loop until the stop flag is set.
     ///
     /// Returns the collected per-thread statistics.
-    pub fn run(&mut self, flush_fn: &dyn Fn() -> Result<(), NvmeBlockError>) -> ThreadResult {
+    pub fn run(&mut self) -> ThreadResult {
         let mut result = ThreadResult::default();
         let timeout_ms = (self.config.duration + 5) * 1000; // generous timeout
 
@@ -96,7 +94,6 @@ impl Worker {
         {
             self.submit_one(timeout_ms);
         }
-        let _ = flush_fn();
 
         // Main IO loop.
         loop {
@@ -104,33 +101,16 @@ impl Worker {
                 break;
             }
 
-            // Always flush so the actor wakes up to poll SPDK for hardware
-            // completions — even when we have no new commands to submit.
-            let _ = flush_fn();
-
             // Drain completions (non-blocking).
             self.drain_completions(&mut result);
 
             // Re-submit to keep pipeline full.
             if !self.stop_flag.load(Ordering::Relaxed) {
-                let mut submitted = 0;
                 while self.in_flight.len() < self.config.queue_depth as usize {
                     self.submit_one(timeout_ms);
-                    submitted += 1;
-                    // Batch: flush after filling a batch of sends to avoid
-                    // blocking on the 64-slot channel capacity.
-                    if submitted >= 64 {
-                        let _ = flush_fn();
-                        self.drain_completions(&mut result);
-                        submitted = 0;
-                    }
-                }
-                if submitted > 0 {
-                    let _ = flush_fn();
                 }
             } else {
-                // Draining: flush to process remaining in-flight ops.
-                let _ = flush_fn();
+                // Draining: yield to let the actor process remaining in-flight ops.
                 std::thread::yield_now();
             }
         }

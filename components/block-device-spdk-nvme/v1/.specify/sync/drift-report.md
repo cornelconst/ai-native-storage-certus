@@ -1,18 +1,17 @@
 # Spec Drift Report
 
-Generated: 2026-04-14
+Generated: 2026-04-16
 Project: block-device-spdk-nvme v1
-Spec: 001-spdk-nvme-block-device
 
 ## Summary
 
 | Category | Count |
 |----------|-------|
-| Specs Analyzed | 1 |
-| Requirements Checked | 20 FR + 8 SC = 28 |
-| Aligned | 18 (64%) |
-| Drifted | 10 (36%) |
-| Not Implemented | 0 |
+| Specs Analyzed | 2 |
+| Requirements Checked | 41 |
+| Aligned | 35 (85%) |
+| Drifted | 3 (7%) |
+| Not Implemented | 3 (7%) |
 | Unspecced Code | 2 |
 
 ## Detailed Findings
@@ -21,85 +20,109 @@ Spec: 001-spdk-nvme-block-device
 
 #### Aligned
 
-- **FR-001**: IBlockDevice interface with `connect_client()` `src/lib.rs:337`
-- **FR-002**: Two SPSC channels per client (ingress + callback) `src/lib.rs:349-357`
-- **FR-007**: Batch submission via `Command::BatchSubmit` dispatched in actor `src/actor.rs:266-281`
-- **FR-010**: Device info queries (capacity, max queue depth, IO queue count, max transfer size, block size, NUMA id, NVMe version) all implemented `src/lib.rs:380-424`
-- **FR-012**: Single NVMe controller per instance, attached at `initialize()` `src/lib.rs:147-228`
-- **FR-013**: Actor thread NUMA-pinned to controller's node `src/lib.rs:201-216`
-- **FR-014**: Actor polls all client ingress channels on every `handle()` call `src/actor.rs:127-141`
-- **FR-015**: QueuePairPool with depths [4, 16, 64, 256] and batch-size-based selection heuristic `src/qpair.rs:136-283`
-- **FR-016**: `logger: ILogger` receptacle defined; `LoggerComponent` used in integration tests `src/lib.rs:73`, `tests/integration.rs:29`
-- **FR-017**: `spdk_env: ISPDKEnv` receptacle checked in `initialize()` `src/lib.rs:148-153`
-- **FR-018**: Commands use `Arc<Mutex<DmaBuffer>>` (read) and `Arc<DmaBuffer>` (write) for zero-copy `interfaces/src/iblock_device.rs:186-225`
-- **FR-020**: All namespace operations dispatch through actor's `handle()` method `src/actor.rs:288-340`
-- **SC-001**: Sync read/write round-trip implemented; latency benchmarks in `benches/latency.rs`
-- **SC-003**: Batch dispatch with throughput benchmarks in `benches/throughput.rs`
-- **SC-005**: Device info queries return hardware properties via `ControllerSnapshot`
-- **SC-007**: NUMA pinning implemented in `initialize()` `src/lib.rs:203-216`
-- **SC-008**: Unit tests in every module, doc tests on public types, two Criterion benchmark suites
+- FR-001: IBlockDevice interface for creating/connecting client channels -> `src/lib.rs:334` (`impl IBlockDevice`), `connect_client()` at line 340
+- FR-002: Two shared-memory channels per client (ingress + callback) -> `src/lib.rs:352-358` creates SPSC ingress and callback channels
+- FR-003 (partial): Sync read/write with ns_id, DmaBuffer, LBA -> `src/actor.rs:339` (ReadSync), `src/actor.rs:364` (WriteSync)
+- FR-004: Async read/write with timeout, unique operation handle, handle in completion -> `src/actor.rs:386` (ReadAsync), `src/actor.rs:462` (WriteAsync); handles via monotonic counter; completions include `OpHandle`
+- FR-005: Abort in-flight async operation by handle -> `src/actor.rs:568` (AbortOp handler removes from pending, sends AbortAck)
+- FR-006: Write-zeros operation -> `src/actor.rs:536`, calls `spdk_nvme_ns_cmd_write_zeroes`
+- FR-007: Batch submission of IO operations -> `src/actor.rs:551` (BatchSubmit recursively dispatches each op with qpair selection)
+- FR-008: Probe, create, format, delete namespaces -> `src/actor.rs:574-626` (NsProbe, NsCreate, NsFormat, NsDelete)
+- FR-010: Device info via IBlockDevice -> `src/lib.rs:383-427` (sector_size, num_sectors, max_queue_depth, num_io_queues, max_transfer_size, block_size, numa_node, nvme_version)
+- FR-011: Telemetry feature gate -> `src/telemetry.rs:15-110` (TelemetryStats); `src/telemetry.rs:122` returns error when feature disabled
+- FR-012: Single NVMe controller per instance -> `src/lib.rs:140` (set_pci_address), `src/lib.rs:152` (initialize attaches one controller)
+- FR-013: Actor pinned to NUMA zone of controller -> `src/lib.rs:209-221` discovers NUMA topology and pins actor
+- FR-014: Actor polls all attached client channels -> `src/actor.rs:225` (poll_clients iterates all clients)
+- FR-015: Exploits different NVMe IO queues with varying depths -> `src/qpair.rs:132` (QueuePairPool depths 4/16/64/256), `src/qpair.rs:266` (select_index heuristic)
+- FR-016: ILogger receptacle -> `src/lib.rs:79` (logger receptacle in define_component!)
+- FR-017: Uses spdk-env component -> `src/lib.rs:80` (spdk_env receptacle), `src/lib.rs:153` checks connected
+- FR-018: DmaBuffer with Arc references -> `interfaces/src/iblock_device.rs:193` (Arc<Mutex<DmaBuffer>> reads), `:202` (Arc<DmaBuffer> writes)
+- FR-019: Client disconnect cancels in-flight ops -> `src/actor.rs:256-258` (swap_remove on channel closed)
+- FR-020: Namespace ops serialized through actor thread -> All ns commands in single-threaded `dispatch_command`
 
 #### Drifted
 
-- **FR-003**: Spec says sync read/write take "timeout" parameter, but `Command::ReadSync` and `Command::WriteSync` have no timeout field.
-  - Location: `interfaces/src/iblock_device.rs:186-203`
-  - Severity: minor (sync ops block to completion; timeout is arguably unnecessary)
+- FR-003: Spec says sync read/write has "timeout" parameter but `Command::ReadSync`/`WriteSync` have no timeout field
+  - Location: `interfaces/src/iblock_device.rs:187-203`
+  - Severity: minor
+  - Note: Sync ops block until SPDK completion callback; timeout only on async variants. Spec wording is ambiguous.
 
-- **FR-004**: Async read/write exist in the `Command` enum with `timeout_ms`, but the actor executes them synchronously. Pending ops are inserted and immediately removed, so timeout tracking never fires.
-  - Location: `src/actor.rs:194-250` (comment: "Execute synchronously for now")
-  - Severity: major
-
-- **FR-005**: `AbortOp` handler removes from pending and sends `AbortAck`, but since async ops complete synchronously and pending ops are immediately removed, there is never anything to abort.
-  - Location: `src/actor.rs:282-287`
-  - Severity: major (depends on FR-004 being fixed)
-
-- **FR-006**: `do_write_zeros()` returns `NvmeBlockError::NotSupported` instead of performing the operation.
-  - Location: `src/actor.rs:492-504`
-  - Severity: moderate (spec says MUST support; could be implemented via zero-filled write buffer)
-
-- **FR-008**: Only `NsProbe` works. `create()`, `format()`, and `delete()` all return `NvmeBlockError::NotSupported` due to missing SPDK bindings.
-  - Location: `src/namespace.rs:71-110`
-  - Severity: moderate (blocked on extended `spdk-sys` bindings)
-
-- **FR-009**: `ControllerReset` cancels pending ops but returns `NotSupported` for the actual reset.
-  - Location: `src/actor.rs:341-357`
-  - Severity: moderate (blocked on extended `spdk-sys` bindings)
-
-- **FR-011 / SC-006**: Telemetry infrastructure exists (`TelemetryStats` with atomic CAS min/max, `record()`, `snapshot()`), but `record()` is never called from the IO dispatch path in `actor.rs`. Statistics are always zero even with the `telemetry` feature enabled.
-  - Location: `src/actor.rs:163-170` (`_telemetry` parameter unused), `src/telemetry.rs:42-72`
-  - Severity: major
-
-- **FR-019**: Client disconnect requires an explicit `ControlMessage::DisconnectClient` message. Automatic detection of channel drop (when client drops `command_tx`) is not implemented. Also, the disconnect handler sends error completions to the callback channel rather than silently discarding them as the spec requires.
-  - Location: `src/actor.rs:528-541`
+- FR-009: Spec says "in-flight async operations" should be handled on reset, but code only cancels pending ops for the REQUESTING client, not all clients
+  - Location: `src/actor.rs:627-651`
   - Severity: moderate
+  - Note: Other clients' in-flight ops may get SPDK errors post-reset but are not proactively cancelled with error completions.
 
-- **SC-002**: Async timeout reporting does not work because async operations complete synchronously (see FR-004).
-  - Severity: major (depends on FR-004)
+- SC-008: Spec requires "Criterion benchmarks for performance-sensitive paths" — qpair selection benchmarks were removed when modules were made `pub(crate)`
+  - Location: `benches/latency.rs`, `benches/throughput.rs`
+  - Severity: minor
+  - Note: Batch construction, sync IO latency, and batch write throughput benchmarks remain. Internal benchmarks could be added as unit-level bench tests.
 
-- **SC-004**: Only namespace probe works; create/format/delete return `NotSupported` (see FR-008).
-  - Severity: moderate
+#### Not Implemented
+
+- SC-001: No test asserts "single-digit microsecond" latency envelope for 4KB sync round-trips
+- SC-002: No test validates async timeout errors arrive "within 10% beyond the timeout value"
+- SC-006: No test validates telemetry accuracy "within 5% of independently measured values"
+
+---
+
+### Spec: 002-iops-benchmark - IOPS Benchmark Example Application
+
+#### Aligned
+
+- FR-001: `--op` flag with read/write/rw -> `config.rs:68`
+- FR-002: `--block-size` flag, default 4096 -> `config.rs:72`
+- FR-003: `--queue-depth` flag, default 32 -> `config.rs:76`
+- FR-004: `--threads` flag, default 1 -> `config.rs:80`
+- FR-005: `--duration` flag, default 10 -> `config.rs:84`
+- FR-006: `--ns-id` flag, default 1 -> `config.rs:88`
+- FR-006a: `--pci-addr` flag -> `config.rs:92`, `main.rs:72-95` (device selection)
+- FR-006b: `--pattern` random/sequential -> `config.rs:96`
+- FR-007: Validation at startup -> `config.rs:112-145` (block_size, threads, duration, queue_depth, namespace)
+- FR-008: Queue depth clamping with warning -> `config.rs:148-156`
+- FR-009: Each thread connects via IBlockDevice -> `main.rs:224`
+- FR-010: Async pipeline kept full -> `worker.rs:92-116` (fills to queue_depth, re-submits on completion)
+- FR-011: rw mode 50/50 random -> `worker.rs:163` (`rand::random::<bool>()`)
+- FR-012: Config summary at startup -> `report.rs:9-23`
+- FR-013: Per-second progress to stderr -> `main.rs:276-298`, `report.rs:28-44` (eprintln!)
+- FR-014: Signal threads to stop, collect results -> `main.rs:269-314` (timer thread + join)
+- FR-015: Final summary with IOPS, MB/s, latency percentiles -> `report.rs:47-112`
+- FR-016: rw mode reports read/write IOPS separately -> `report.rs:87-98`
+- FR-017: Random/sequential LBA patterns -> `lba.rs:12-85` (RandomLba uniform, SequentialLba non-overlapping)
+- FR-018: Counts and reports IO errors -> `worker.rs:185,195,203,207`, `report.rs:104`
+- FR-019: Exit 0 on success, non-zero on failure -> `main.rs:321` (exit(0)), various exit(1)/exit(2)
+- FR-020: `--quiet` flag -> `config.rs:104`, `main.rs:276` (guards progress output)
+- FR-021: `--help` flag -> provided by clap derive
+
+#### Drifted
+
+(none)
+
+#### Not Implemented
+
+(none)
+
+---
 
 ### Unspecced Code
 
-| Feature | Location | Description | Suggested Spec |
-|---------|----------|-------------|----------------|
-| `flush_io()` | `src/lib.rs:322-333` | Sends `ControlMessage::Poll` to wake the actor for IO processing. Required because the actor only polls client channels when handling a control message. | Should be documented as part of the client API contract in FR-001/FR-002. |
-| `ControllerSnapshot` | `src/lib.rs:110-128` | Caches controller properties at init time so device info queries avoid actor round-trips. | Internal optimization; no spec change needed, but could be mentioned in architecture notes. |
+| Feature | Location | Lines | Suggested Spec |
+|---------|----------|-------|----------------|
+| `--io-mode sync\|async` flag | `apps/iops-benchmark/src/config.rs:28-43` | 16 | 002-iops-benchmark |
+| `IBlockDeviceAdmin` interface | `src/lib.rs:77`, `interfaces/src/iblock_device.rs:431-439` | 10 | 001-spdk-nvme-block-device |
+
+**IoMode**: The benchmark has a `--io-mode sync|async` flag (default: async) not covered in spec 002. This extends beyond FR-010 which only mentions async commands. Useful feature but unspecced.
+
+**IBlockDeviceAdmin**: The admin lifecycle interface (`set_pci_address`, `initialize`) is implemented, declared in `provides`, and used by the benchmark and integration tests, but is not mentioned in spec 001's requirements.
 
 ## Inter-Spec Conflicts
 
-None identified. Only one spec exists for this component.
+- **WriteAsync buffer lifetime bug**: `tests/integration.rs:634-638` documents a known bug where `WriteAsync` drops the `Arc<DmaBuffer>` after SPDK submission but before NVMe DMA completes (use-after-free). Spec FR-004 requires async write to work correctly. Not a spec conflict but a critical implementation gap.
 
 ## Recommendations
 
-1. **Wire telemetry recording into the IO path** (FR-011, SC-006): Call `telemetry.record(latency_ns, bytes)` in `do_sync_read()` and `do_sync_write()` when the `telemetry` feature is enabled. This is the lowest-effort highest-value fix.
-
-2. **Implement true async IO** (FR-004, FR-005, SC-002): Replace the synchronous execution in `ReadAsync`/`WriteAsync` handlers with actual SPDK async submission using completion callbacks. This unblocks timeout tracking and abort functionality.
-
-3. **Implement write-zeros** (FR-006): Use a zero-filled DMA buffer with a regular `spdk_nvme_ns_cmd_write` call as a workaround until `spdk_nvme_ns_cmd_write_zeroes` is available in the bindings.
-
-4. **Auto-detect client disconnect** (FR-019): Check for closed ingress channels during `poll_clients()` (e.g., `try_recv()` returns a disconnected error). On detection, cancel pending ops and remove the client without sending error completions.
-
-5. **Extend `spdk-sys` bindings** (FR-008, FR-009): Add bindings for `spdk_nvme_ctrlr_create_ns`, `spdk_nvme_ctrlr_delete_ns`, `spdk_nvme_ctrlr_format`, and `spdk_nvme_ctrlr_reset` to unblock namespace management and controller reset.
-
-6. **Document `flush_io()` contract**: Since clients must call `flush_io()` after sending commands to ensure prompt processing, this should be documented in the IBlockDevice interface contract or the client API usage examples.
+1. **Fix FR-009 controller reset scope** (moderate): Cancel pending ops for ALL clients on reset, not just the requesting client.
+2. **Fix WriteAsync buffer lifetime** (critical): Pin the write buffer `Arc<DmaBuffer>` in `PendingOp` until the SPDK completion callback fires.
+3. **Clarify FR-003 timeout** (minor): Update spec to state timeout applies only to async operations, or add optional timeout to sync commands.
+4. **Add IBlockDeviceAdmin to spec 001**: Document the admin lifecycle interface as a formal requirement (FR-021).
+5. **Add `--io-mode` to spec 002**: Add FR-022 covering the sync/async IO submission mode flag.
+6. **Add SC validation tests**: Create tests for SC-001 (latency envelope), SC-002 (timeout accuracy), SC-006 (telemetry accuracy).

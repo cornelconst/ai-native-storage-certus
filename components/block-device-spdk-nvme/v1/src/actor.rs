@@ -6,13 +6,13 @@
 //! client ingress channels for IO commands.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use component_core::actor::ActorHandler;
 use component_core::channel::ChannelError;
 
-use interfaces::{Command, Completion, NvmeBlockError, OpHandle};
+use interfaces::{Command, Completion, DmaBuffer, NvmeBlockError, OpHandle};
 
 use crate::command::{ClientSession, ControlMessage};
 use crate::controller::NvmeController;
@@ -112,7 +112,14 @@ pub(crate) struct PendingOp {
     pub deadline: Instant,
     /// Index of the queue pair used for this operation.
     pub qpair_idx: usize,
+    /// Pinned read buffer — keeps DMA memory alive until SPDK completion.
+    pub read_buf: Option<Arc<Mutex<DmaBuffer>>>,
+    /// Pinned write buffer — keeps DMA memory alive until SPDK completion.
+    pub write_buf: Option<Arc<DmaBuffer>>,
 }
+
+// SAFETY: PendingOp is only accessed from the actor thread.
+unsafe impl Send for PendingOp {}
 
 /// Per-client state maintained by the actor, extending `ClientSession`
 /// with async operation tracking.
@@ -140,6 +147,8 @@ pub(crate) struct BlockDeviceHandler {
     /// Telemetry stats collector (feature-gated).
     #[cfg(feature = "telemetry")]
     pub telemetry: Arc<TelemetryStats>,
+    /// Last time `check_timeouts()` was called, used to throttle to ~1ms.
+    last_timeout_check: Instant,
 }
 
 /// Completion context for synchronous SPDK NVMe commands.
@@ -180,7 +189,7 @@ unsafe extern "C" fn sync_completion_cb(
 
 impl BlockDeviceHandler {
     /// Create a new handler with the given controller.
-    pub fn new(controller: NvmeController) -> Self {
+    pub(crate) fn new(controller: NvmeController) -> Self {
         Self {
             controller,
             clients: Vec::new(),
@@ -188,18 +197,23 @@ impl BlockDeviceHandler {
             async_completions: Vec::new(),
             #[cfg(feature = "telemetry")]
             telemetry: Arc::new(TelemetryStats::new()),
+            last_timeout_check: Instant::now(),
         }
     }
 
     /// Create a new handler with the given controller and shared telemetry.
     #[cfg(feature = "telemetry")]
-    pub fn with_telemetry(controller: NvmeController, telemetry: Arc<TelemetryStats>) -> Self {
+    pub(crate) fn with_telemetry(
+        controller: NvmeController,
+        telemetry: Arc<TelemetryStats>,
+    ) -> Self {
         Self {
             controller,
             clients: Vec::new(),
             next_handle: 1,
             async_completions: Vec::new(),
             telemetry,
+            last_timeout_check: Instant::now(),
         }
     }
 
@@ -223,6 +237,11 @@ impl BlockDeviceHandler {
                 let client = &mut self.clients[i];
                 match client.session.ingress_rx.try_recv() {
                     Ok(cmd) => {
+                        if matches!(cmd, Command::ControllerReset) {
+                            let client_id = self.clients[i].session.id;
+                            self.handle_controller_reset(client_id);
+                            continue;
+                        }
                         let ClientState {
                             session,
                             pending_ops,
@@ -318,6 +337,42 @@ impl BlockDeviceHandler {
         }
     }
 
+    /// Handle a controller reset, cancelling ALL clients' pending ops.
+    fn handle_controller_reset(&mut self, requesting_client_id: u64) {
+        for client in &mut self.clients {
+            for (&h, _) in client.pending_ops.iter() {
+                let _ = client.session.callback_tx.send(Completion::Error {
+                    handle: Some(OpHandle(h)),
+                    error: NvmeBlockError::Aborted(
+                        "cancelled due to controller reset".into(),
+                    ),
+                });
+            }
+            client.pending_ops.clear();
+        }
+
+        // SAFETY: controller pointer is valid while actor is running.
+        let rc = unsafe { spdk_sys::spdk_nvme_ctrlr_reset(self.controller.as_ptr()) };
+        let result = if rc == 0 {
+            self.controller.refresh_namespaces();
+            Ok(())
+        } else {
+            Err(NvmeBlockError::BlockDevice(
+                interfaces::BlockDeviceError::ProbeFailure(format!(
+                    "spdk_nvme_ctrlr_reset failed with rc={rc}"
+                )),
+            ))
+        };
+
+        if let Some(client) = self
+            .clients
+            .iter()
+            .find(|c| c.session.id == requesting_client_id)
+        {
+            let _ = client.session.callback_tx.send(Completion::ResetDone { result });
+        }
+    }
+
     /// Dispatch a single command from a client.
     fn dispatch_command(
         controller: &mut NvmeController,
@@ -404,6 +459,8 @@ impl BlockDeviceHandler {
                         handle,
                         deadline: Instant::now() + std::time::Duration::from_millis(timeout_ms),
                         qpair_idx: qp_idx,
+                        read_buf: Some(buf.clone()),
+                        write_buf: None,
                     },
                 );
 
@@ -420,7 +477,10 @@ impl BlockDeviceHandler {
                     bytes: buf_guard.len() as u64,
                 });
 
-                let qp = controller.qpairs.get_mut(qp_idx).expect("qpair index valid");
+                let qp = controller
+                    .qpairs
+                    .get_mut(qp_idx)
+                    .expect("qpair index valid");
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_read(
                         ns_ptr,
@@ -477,6 +537,8 @@ impl BlockDeviceHandler {
                         handle,
                         deadline: Instant::now() + std::time::Duration::from_millis(timeout_ms),
                         qpair_idx: qp_idx,
+                        read_buf: None,
+                        write_buf: Some(buf.clone()),
                     },
                 );
 
@@ -492,7 +554,10 @@ impl BlockDeviceHandler {
                     bytes: buf.len() as u64,
                 });
 
-                let qp = controller.qpairs.get_mut(qp_idx).expect("qpair index valid");
+                let qp = controller
+                    .qpairs
+                    .get_mut(qp_idx)
+                    .expect("qpair index valid");
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_write(
                         ns_ptr,
@@ -612,29 +677,7 @@ impl BlockDeviceHandler {
                 }
             }
             Command::ControllerReset => {
-                // Cancel all pending ops for this client.
-                for (&h, _) in pending_ops.iter() {
-                    let _ = session.callback_tx.send(Completion::Error {
-                        handle: Some(OpHandle(h)),
-                        error: NvmeBlockError::Aborted("cancelled due to controller reset".into()),
-                    });
-                }
-                pending_ops.clear();
-
-                // SAFETY: controller pointer is valid while actor is running.
-                let rc = unsafe { spdk_sys::spdk_nvme_ctrlr_reset(controller.as_ptr()) };
-                let result = if rc == 0 {
-                    controller.refresh_namespaces();
-                    Ok(())
-                } else {
-                    Err(NvmeBlockError::BlockDevice(
-                        interfaces::BlockDeviceError::ProbeFailure(format!(
-                            "spdk_nvme_ctrlr_reset failed with rc={rc}"
-                        )),
-                    ))
-                };
-
-                let _ = session.callback_tx.send(Completion::ResetDone { result });
+                unreachable!("ControllerReset is intercepted in poll_clients");
             }
         }
     }
@@ -850,13 +893,13 @@ impl BlockDeviceHandler {
 
     /// Get a reference to the controller.
     #[allow(dead_code)]
-    pub fn controller(&self) -> &NvmeController {
+    pub(crate) fn controller(&self) -> &NvmeController {
         &self.controller
     }
 
     /// Get a mutable reference to the controller.
     #[allow(dead_code)]
-    pub fn controller_mut(&mut self) -> &mut NvmeController {
+    pub(crate) fn controller_mut(&mut self) -> &mut NvmeController {
         &mut self.controller
     }
 }
@@ -876,9 +919,6 @@ impl ActorHandler<ControlMessage> for BlockDeviceHandler {
                     self.clients.swap_remove(pos);
                 }
             }
-            ControlMessage::Poll => {
-                // No-op — poll_clients() is called after the match.
-            }
         }
 
         // After processing the control message, poll all clients.
@@ -886,6 +926,18 @@ impl ActorHandler<ControlMessage> for BlockDeviceHandler {
 
         // Check for timed-out operations.
         self.check_timeouts();
+    }
+
+    fn on_idle(&mut self) {
+        self.poll_clients();
+        // Throttle timeout checks to ~1ms — check_timeouts() allocates a Vec
+        // and calls Instant::now() for every pending op, which is too expensive
+        // to run on every poll iteration (millions/sec).
+        let now = Instant::now();
+        if now.duration_since(self.last_timeout_check).as_millis() >= 1 {
+            self.check_timeouts();
+            self.last_timeout_check = now;
+        }
     }
 
     fn on_start(&mut self) {
@@ -916,6 +968,8 @@ mod tests {
             handle: 42,
             deadline: Instant::now() + std::time::Duration::from_secs(5),
             qpair_idx: 0,
+            read_buf: None,
+            write_buf: None,
         };
         assert_eq!(op.handle, 42);
         assert_eq!(op.qpair_idx, 0);

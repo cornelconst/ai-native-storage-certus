@@ -288,6 +288,15 @@ impl<T: Send + 'static> MpscReceiver<T> {
             }
         }
     }
+
+    /// Register the current thread for wakeup by senders.
+    ///
+    /// After calling this, any sender that pushes a message will call
+    /// `unpark()` on the registered thread. Used by the actor polling
+    /// loop before calling `thread::park_timeout()`.
+    pub fn register_for_unpark(&self) {
+        *self.state.receiver_thread.lock().unwrap() = Some(thread::current());
+    }
 }
 
 impl<T: Send + 'static> IReceiver<T> for MpscReceiver<T> {
