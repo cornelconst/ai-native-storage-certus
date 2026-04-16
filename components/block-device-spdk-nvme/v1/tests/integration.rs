@@ -119,8 +119,10 @@ fn get_spdk_context() -> Option<&'static SpdkHardwareContext> {
                 func: spdk_addr.func,
             };
 
-            let admin = query::<dyn block_device_spdk_nvme::IBlockDeviceAdmin + Send + Sync>(&*block_dev)
-                .expect("IBlockDeviceAdmin query");
+            let admin = query::<dyn interfaces::iblock_device::IBlockDeviceAdmin + Send + Sync>(
+                &*block_dev,
+            )
+            .expect("IBlockDeviceAdmin query");
             admin.set_pci_address(addr);
 
             // Initialize the block device (probe controller, start actor).

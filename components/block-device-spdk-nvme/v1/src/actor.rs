@@ -6,13 +6,13 @@
 //! client ingress channels for IO commands.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use component_core::actor::ActorHandler;
 use component_core::channel::ChannelError;
 
-use interfaces::{Command, Completion, NvmeBlockError, OpHandle};
+use interfaces::{Command, Completion, DmaBuffer, NvmeBlockError, OpHandle};
 
 use crate::command::{ClientSession, ControlMessage};
 use crate::controller::NvmeController;
@@ -112,7 +112,14 @@ pub(crate) struct PendingOp {
     pub deadline: Instant,
     /// Index of the queue pair used for this operation.
     pub qpair_idx: usize,
+    /// Pinned read buffer — keeps DMA memory alive until SPDK completion.
+    pub read_buf: Option<Arc<Mutex<DmaBuffer>>>,
+    /// Pinned write buffer — keeps DMA memory alive until SPDK completion.
+    pub write_buf: Option<Arc<DmaBuffer>>,
 }
+
+// SAFETY: PendingOp is only accessed from the actor thread.
+unsafe impl Send for PendingOp {}
 
 /// Per-client state maintained by the actor, extending `ClientSession`
 /// with async operation tracking.
@@ -230,6 +237,11 @@ impl BlockDeviceHandler {
                 let client = &mut self.clients[i];
                 match client.session.ingress_rx.try_recv() {
                     Ok(cmd) => {
+                        if matches!(cmd, Command::ControllerReset) {
+                            let client_id = self.clients[i].session.id;
+                            self.handle_controller_reset(client_id);
+                            continue;
+                        }
                         let ClientState {
                             session,
                             pending_ops,
@@ -325,6 +337,42 @@ impl BlockDeviceHandler {
         }
     }
 
+    /// Handle a controller reset, cancelling ALL clients' pending ops.
+    fn handle_controller_reset(&mut self, requesting_client_id: u64) {
+        for client in &mut self.clients {
+            for (&h, _) in client.pending_ops.iter() {
+                let _ = client.session.callback_tx.send(Completion::Error {
+                    handle: Some(OpHandle(h)),
+                    error: NvmeBlockError::Aborted(
+                        "cancelled due to controller reset".into(),
+                    ),
+                });
+            }
+            client.pending_ops.clear();
+        }
+
+        // SAFETY: controller pointer is valid while actor is running.
+        let rc = unsafe { spdk_sys::spdk_nvme_ctrlr_reset(self.controller.as_ptr()) };
+        let result = if rc == 0 {
+            self.controller.refresh_namespaces();
+            Ok(())
+        } else {
+            Err(NvmeBlockError::BlockDevice(
+                interfaces::BlockDeviceError::ProbeFailure(format!(
+                    "spdk_nvme_ctrlr_reset failed with rc={rc}"
+                )),
+            ))
+        };
+
+        if let Some(client) = self
+            .clients
+            .iter()
+            .find(|c| c.session.id == requesting_client_id)
+        {
+            let _ = client.session.callback_tx.send(Completion::ResetDone { result });
+        }
+    }
+
     /// Dispatch a single command from a client.
     fn dispatch_command(
         controller: &mut NvmeController,
@@ -411,6 +459,8 @@ impl BlockDeviceHandler {
                         handle,
                         deadline: Instant::now() + std::time::Duration::from_millis(timeout_ms),
                         qpair_idx: qp_idx,
+                        read_buf: Some(buf.clone()),
+                        write_buf: None,
                     },
                 );
 
@@ -487,6 +537,8 @@ impl BlockDeviceHandler {
                         handle,
                         deadline: Instant::now() + std::time::Duration::from_millis(timeout_ms),
                         qpair_idx: qp_idx,
+                        read_buf: None,
+                        write_buf: Some(buf.clone()),
                     },
                 );
 
@@ -625,29 +677,7 @@ impl BlockDeviceHandler {
                 }
             }
             Command::ControllerReset => {
-                // Cancel all pending ops for this client.
-                for (&h, _) in pending_ops.iter() {
-                    let _ = session.callback_tx.send(Completion::Error {
-                        handle: Some(OpHandle(h)),
-                        error: NvmeBlockError::Aborted("cancelled due to controller reset".into()),
-                    });
-                }
-                pending_ops.clear();
-
-                // SAFETY: controller pointer is valid while actor is running.
-                let rc = unsafe { spdk_sys::spdk_nvme_ctrlr_reset(controller.as_ptr()) };
-                let result = if rc == 0 {
-                    controller.refresh_namespaces();
-                    Ok(())
-                } else {
-                    Err(NvmeBlockError::BlockDevice(
-                        interfaces::BlockDeviceError::ProbeFailure(format!(
-                            "spdk_nvme_ctrlr_reset failed with rc={rc}"
-                        )),
-                    ))
-                };
-
-                let _ = session.callback_tx.send(Completion::ResetDone { result });
+                unreachable!("ControllerReset is intercepted in poll_clients");
             }
         }
     }
@@ -938,6 +968,8 @@ mod tests {
             handle: 42,
             deadline: Instant::now() + std::time::Duration::from_secs(5),
             qpair_idx: 0,
+            read_buf: None,
+            write_buf: None,
         };
         assert_eq!(op.handle, 42);
         assert_eq!(op.qpair_idx, 0);

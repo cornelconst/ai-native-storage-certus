@@ -19,7 +19,7 @@ pub mod spdk_types;
 mod ispdk_env;
 
 #[cfg(feature = "spdk")]
-mod iblock_device;
+pub mod iblock_device;
 mod iextent_manager;
 
 #[cfg(feature = "spdk")]
