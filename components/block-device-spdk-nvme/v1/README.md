@@ -4,10 +4,58 @@ High-performance NVMe block device component using SPDK for direct userspace NVM
 
 ## Architecture
 
-Each component instance runs a dedicated **actor thread** pinned to a NUMA-local core that polls all attached client channels. Clients communicate with the actor through per-client SPSC channel pairs:
+### Thread Model
+
+Each component instance runs a single **actor thread** that owns the NVMe controller and all SPDK resources. The actor is pinned to the first CPU on the controller's NUMA node to ensure cache/memory locality with the NVMe device.
+
+The actor uses a **self-polling loop** with adaptive parking:
+
+1. **Hot path**: `try_recv()` on the control channel + `poll_clients()` on every iteration (no blocking).
+2. **Idle park**: After 10M consecutive empty polls, the actor calls `thread::park_timeout(10ms)`. MPSC senders automatically unpark the actor when a new control message arrives.
+3. **Timeout throttle**: `check_timeouts()` runs at most once per millisecond (not every poll) to avoid overhead from `Instant::now()` and `Vec` allocation in the hot path.
+
+Client threads should be pinned to **different** NUMA-local cores to avoid CFS time-slicing contention with the actor. The `iops-benchmark` tool demonstrates this pattern using `component_core::numa::{NumaTopology, CpuSet, set_thread_affinity}`.
+
+```
+┌─────────────┐     SPSC ingress      ┌──────────────────────────┐
+│  Client 0   │ ───── Command ──────>  │                          │
+│  (CPU 1)    │ <── Completion ──────  │    Actor Thread (CPU 0)  │
+└─────────────┘     SPSC callback      │                          │
+                                       │  - poll_clients()        │
+┌─────────────┐     SPSC ingress      │  - dispatch to SPDK      │
+│  Client 1   │ ───── Command ──────>  │  - process completions   │
+│  (CPU 2)    │ <── Completion ──────  │  - check timeouts (~1ms) │
+└─────────────┘     SPSC callback      │                          │
+                                       │  ┌──── NVMe Controller ──┐
+        ...                            │  │  QP0 (depth 4)        │
+                                       │  │  QP1 (depth 16)       │
+┌─────────────┐     SPSC ingress      │  │  QP2 (depth 64)       │
+│  Client N   │ ───── Command ──────>  │  │  QP3 (depth 256)      │
+│  (CPU N+1)  │ <── Completion ──────  │  └────────────────────────┘
+└─────────────┘     SPSC callback      └──────────────────────────┘
+```
+
+### Client Channels
+
+Each client gets two shared-memory SPSC channel pairs via `connect_client()`:
 
 - **Ingress channel** (client -> actor): `Command` messages (read, write, probe, etc.)
 - **Callback channel** (actor -> client): `Completion` notifications
+
+The actor drains all client ingress channels on every poll iteration, interleaved with SPDK completion processing. Disconnected clients (sender dropped) are detected and removed automatically.
+
+### NVMe Queue Pair Pool
+
+The actor allocates multiple IO queue pairs at standard depths (`[4, 16, 64, 256]`) to exploit NVMe hardware parallelism. Queue pair selection uses a **shallowest-fit** heuristic:
+
+| Batch size | Selected QP | Rationale |
+|------------|-------------|-----------|
+| 1          | QP0 (4)     | Minimal latency for single ops |
+| 5-16       | QP1 (16)    | Small batches |
+| 17-64      | QP2 (64)    | Medium batches |
+| 65+        | QP3 (256)   | High-throughput bulk IO |
+
+The selection considers in-flight operations: if a shallow queue is full, the next deeper queue is chosen. This avoids head-of-line blocking while keeping small IOs on low-latency queues.
 
 ### Key Interfaces
 
@@ -19,15 +67,15 @@ Each component instance runs a dedicated **actor thread** pinned to a NUMA-local
 
 ### Messaging API
 
-- **Sync IO**: `ReadSync`, `WriteSync` — actor busy-polls until NVMe completion
-- **Async IO**: `ReadAsync`, `WriteAsync` — SPDK async submission with timeout/abort
+- **Sync IO**: `ReadSync`, `WriteSync` — actor busy-polls a single queue pair until NVMe completion
+- **Async IO**: `ReadAsync`, `WriteAsync` — SPDK async submission with timeout; completions routed back via callback channel
 - **Admin**: `NsProbe`, `NsCreate`, `NsFormat`, `NsDelete`, `ControllerReset`
 - **Batch**: `BatchSubmit` — multiple operations in a single message
 - **Other**: `WriteZeros`, `AbortOp`
 
 ### DMA Buffers
 
-IO operations use `DmaBuffer` (SPDK DMA-safe memory). Reads take `Arc<Mutex<DmaBuffer>>`, writes take `Arc<DmaBuffer>`.
+IO operations use `DmaBuffer` (SPDK DMA-safe memory). Reads take `Arc<Mutex<DmaBuffer>>`, writes take `Arc<DmaBuffer>`. Since clients are in-process, `Arc` references avoid copies.
 
 ### Telemetry
 
@@ -117,7 +165,7 @@ cargo bench -p block-device-spdk-nvme --bench throughput
 
 ```
 src/
-  lib.rs          Component definition, connect_client(), flush_io()
+  lib.rs          Component definition, connect_client(), IBlockDevice impl
   actor.rs        BlockDeviceHandler, command dispatch, async completions
   command.rs      ControlMessage, ClientSession (internal types)
   controller.rs   NvmeController safe wrapper

@@ -23,6 +23,7 @@ use clap::Parser;
 use block_device_spdk_nvme::{BlockDeviceSpdkNvmeComponentV1, Command, Completion, IBlockDevice};
 use component_core::binding::bind;
 use component_core::iunknown::query;
+use component_core::numa::{set_thread_affinity, CpuSet, NumaTopology};
 use example_logger::LoggerComponent;
 use spdk_env::SPDKEnvComponent;
 
@@ -95,14 +96,20 @@ fn main() {
 
     let pci_addr_str = format!("{}", device.address);
 
-    block_dev.set_pci_address(interfaces::PciAddress {
+    let admin = query::<dyn interfaces::IBlockDeviceAdmin + Send + Sync>(&*block_dev)
+        .unwrap_or_else(|| {
+            eprintln!("error: failed to query IBlockDeviceAdmin");
+            std::process::exit(2);
+        });
+
+    admin.set_pci_address(interfaces::PciAddress {
         domain: device.address.domain,
         bus: device.address.bus,
         dev: device.address.dev,
         func: device.address.func,
     });
 
-    if let Err(e) = block_dev.initialize() {
+    if let Err(e) = admin.initialize() {
         eprintln!("error: block device init failed: {e}");
         std::process::exit(2);
     }
@@ -125,10 +132,6 @@ fn main() {
             eprintln!("error: failed to send NsProbe: {e}");
             std::process::exit(2);
         });
-    block_dev.flush_io().unwrap_or_else(|e| {
-        eprintln!("error: flush_io failed: {e}");
-        std::process::exit(2);
-    });
 
     let namespaces = match probe_channels.completion_rx.recv() {
         Ok(Completion::NsProbeResult { namespaces }) => namespaces,
@@ -174,6 +177,42 @@ fn main() {
     report::print_config(&config, &pci_addr_str, &ns_info);
     println!();
 
+    // --- Discover NUMA-local CPUs for worker thread pinning ---
+    // The actor is pinned to the first CPU on the controller's NUMA node.
+    // Pin workers to *other* cores on the same node to avoid contention.
+    let numa_node = ibd.numa_node();
+    let (actor_cpu, worker_cpus): (Option<usize>, Vec<usize>) = if numa_node >= 0 {
+        NumaTopology::discover()
+            .ok()
+            .and_then(|topo| {
+                topo.node(numa_node as usize)
+                    .map(|n| n.cpus().iter().collect::<Vec<_>>())
+            })
+            .map(|cpus| {
+                // Actor uses cpus[0]; workers get the rest.
+                let actor = cpus.first().copied();
+                let workers = if cpus.len() > 1 {
+                    cpus[1..].to_vec()
+                } else {
+                    vec![]
+                };
+                (actor, workers)
+            })
+            .unwrap_or((None, vec![]))
+    } else {
+        (None, vec![])
+    };
+
+    if !worker_cpus.is_empty() {
+        eprintln!(
+            "info: pinning {} worker(s) to NUMA-{} CPUs {:?} (actor on CPU {})",
+            config.threads,
+            numa_node,
+            &worker_cpus,
+            actor_cpu.unwrap_or(0),
+        );
+    }
+
     // --- Launch workers ---
     let stop_flag = Arc::new(AtomicBool::new(false));
     let config_arc = Arc::new(config.clone());
@@ -194,12 +233,16 @@ fn main() {
         let worker_stop = Arc::clone(&stop_flag);
         let worker_ns_info = ns_info.clone();
 
-        // We need flush_io from the block_dev component. Since the worker runs on
-        // a separate thread, we pass a reference to block_dev through a closure.
-        // BlockDeviceSpdkNvmeComponentV1 is behind an Arc, and flush_io takes &self.
-        let block_dev_ref = Arc::clone(&block_dev);
-
+        let worker_cpus_clone = worker_cpus.clone();
         let handle = std::thread::spawn(move || {
+            // Pin this worker to a NUMA-local core (round-robin, skipping the actor core).
+            if !worker_cpus_clone.is_empty() {
+                let cpu = worker_cpus_clone[thread_idx as usize % worker_cpus_clone.len()];
+                if let Ok(cs) = CpuSet::from_cpu(cpu) {
+                    let _ = set_thread_affinity(&cs);
+                }
+            }
+
             let mut w = worker::Worker::new(
                 worker_config,
                 channels,
@@ -213,8 +256,7 @@ fn main() {
                 std::process::exit(2);
             });
 
-            let flush_fn = || block_dev_ref.flush_io();
-            w.run(&flush_fn)
+            w.run()
         });
 
         worker_handles.push(handle);

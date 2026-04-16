@@ -89,6 +89,13 @@ pub trait ActorHandler<M: Send + 'static>: Send + 'static {
     /// Called once when the actor is shutting down (after the message loop exits).
     /// Default implementation is a no-op.
     fn on_stop(&mut self) {}
+
+    /// Called when the actor's message queue is empty.
+    ///
+    /// Override this for actors that have background work (e.g., polling
+    /// IO channels, processing completions) that should run even when no
+    /// control messages are pending. The default implementation is a no-op.
+    fn on_idle(&mut self) {}
 }
 
 /// Handle to a running actor. Returned by [`Actor::activate`].
@@ -628,15 +635,36 @@ where
 
             handler.on_start();
 
+            const PARK_THRESHOLD: u64 = 10_000_000;
+            const PARK_DURATION: std::time::Duration = std::time::Duration::from_millis(10);
+            let mut idle_count: u64 = 0;
+
             loop {
-                match receiver.recv() {
+                match receiver.try_recv() {
                     Ok(msg) => {
+                        idle_count = 0;
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             handler.handle(msg);
                         }));
 
                         if let Err(panic_payload) = result {
                             error_callback(panic_payload);
+                        }
+                    }
+                    Err(ChannelError::Empty) => {
+                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            handler.on_idle();
+                        }));
+
+                        if let Err(panic_payload) = result {
+                            error_callback(panic_payload);
+                        }
+
+                        idle_count += 1;
+                        if idle_count >= PARK_THRESHOLD {
+                            receiver.register_for_unpark();
+                            thread::park_timeout(PARK_DURATION);
+                            idle_count = 0;
                         }
                     }
                     Err(ChannelError::Closed) => break,

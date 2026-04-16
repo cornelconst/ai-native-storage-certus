@@ -13,8 +13,8 @@
 //! - **Feature-gated telemetry**: `--features telemetry` for IO statistics
 //!
 //! After connecting a client via [`IBlockDevice::connect_client()`], callers
-//! must invoke [`BlockDeviceSpdkNvmeComponentV1::flush_io()`] after sending
-//! commands on `command_tx` to wake the actor for prompt processing.
+//! send commands on `command_tx` and receive completions on `completion_rx`.
+//! The actor thread self-polls and processes commands automatically.
 //!
 //! # Usage
 //!
@@ -28,15 +28,15 @@
 //! // let channels = ibd.connect_client().unwrap();
 //! ```
 //!
-//! # Modules
+//! # Internal Modules
 //!
-//! - [`controller`] — Safe wrapper around SPDK NVMe controller
-//! - [`qpair`] — IO queue pair pool with depth-based selection
-//! - [`namespace`] — Namespace management operations
+//! - `controller` — Safe wrapper around SPDK NVMe controller
+//! - `qpair` — IO queue pair pool with depth-based selection
+//! - `namespace` — Namespace management operations
 
-pub mod controller;
-pub mod namespace;
-pub mod qpair;
+pub(crate) mod controller;
+pub(crate) mod namespace;
+pub(crate) mod qpair;
 
 pub(crate) mod command;
 pub(crate) mod telemetry;
@@ -62,6 +62,7 @@ pub use interfaces::{
 use crate::actor::BlockDeviceHandler;
 use crate::command::{ClientSession, ControlMessage};
 use crate::controller::NvmeController;
+use interfaces::IBlockDeviceAdmin;
 
 /// Channel capacity for per-client SPSC channels.
 const CLIENT_CHANNEL_CAPACITY: usize = 64;
@@ -73,7 +74,7 @@ const CLIENT_CHANNEL_CAPACITY: usize = 64;
 define_component! {
     pub BlockDeviceSpdkNvmeComponentV1 {
         version: "0.1.0",
-        provides: [IBlockDevice],
+        provides: [IBlockDevice, IBlockDeviceAdmin],
         receptacles: {
             logger: ILogger,
             spdk_env: ISPDKEnv,
@@ -88,54 +89,23 @@ define_component! {
     }
 }
 
-/// A snapshot of controller properties taken at initialization time.
-///
-/// Stored in the component for answering device info queries without
-/// locking the actor.
-///
-/// # Examples
-///
-/// ```
-/// use block_device_spdk_nvme::ControllerSnapshot;
-/// use block_device_spdk_nvme::controller::NvmeVersion;
-///
-/// let snap = ControllerSnapshot {
-///     sector_size: 512,
-///     num_sectors: 1_000_000,
-///     max_queue_depth: 256,
-///     num_io_queues: 4,
-///     max_transfer_size: 131072,
-///     block_size: 512,
-///     numa_node: 0,
-///     nvme_version: NvmeVersion { major: 1, minor: 4, tertiary: 0 },
-/// };
-/// assert_eq!(snap.sector_size, 512);
-/// ```
 #[derive(Debug, Clone)]
-pub struct ControllerSnapshot {
-    /// Sector size of the default namespace.
-    pub sector_size: u32,
-    /// Number of sectors in the default namespace.
-    pub num_sectors: u64,
-    /// Maximum queue depth.
-    pub max_queue_depth: u32,
-    /// Number of IO queues.
-    pub num_io_queues: u32,
-    /// Maximum transfer size in bytes.
-    pub max_transfer_size: u32,
-    /// Block size (same as sector size for NVMe).
-    pub block_size: u32,
-    /// NUMA node of the controller.
-    pub numa_node: i32,
-    /// NVMe specification version.
-    pub nvme_version: controller::NvmeVersion,
+pub(crate) struct ControllerSnapshot {
+    pub(crate) sector_size: u32,
+    pub(crate) num_sectors: u64,
+    pub(crate) max_queue_depth: u32,
+    pub(crate) num_io_queues: u32,
+    pub(crate) max_transfer_size: u32,
+    pub(crate) block_size: u32,
+    pub(crate) numa_node: i32,
+    pub(crate) nvme_version: controller::NvmeVersion,
 }
 
 impl BlockDeviceSpdkNvmeComponentV1 {
     /// Set the PCI address of the NVMe controller to attach to.
     ///
     /// Must be called before [`initialize()`](Self::initialize).
-    pub fn set_pci_address(&self, addr: PciAddress) {
+    pub(crate) fn set_pci_address(&self, addr: PciAddress) {
         *self.pci_address.write().expect("pci_address lock poisoned") = Some(addr);
     }
 
@@ -148,7 +118,7 @@ impl BlockDeviceSpdkNvmeComponentV1 {
     ///
     /// Returns [`NvmeBlockError::NotInitialized`] if receptacles are not
     /// wired, or if the SPDK environment is not initialized.
-    pub fn initialize(&self) -> Result<(), NvmeBlockError> {
+    pub(crate) fn initialize(&self) -> Result<(), NvmeBlockError> {
         if !self.spdk_env.is_connected() {
             return Err(NvmeBlockError::NotInitialized(
                 "spdk_env receptacle not connected — wire ISPDKEnv before calling initialize()"
@@ -317,23 +287,16 @@ impl BlockDeviceSpdkNvmeComponentV1 {
                 )
             })
     }
+}
 
-    /// Wake the actor to process pending IO commands on client channels.
-    ///
-    /// The actor's message loop only polls client ingress channels when
-    /// handling a control message. Call this after sending IO commands via
-    /// a client channel to ensure the actor processes them promptly.
-    pub fn flush_io(&self) -> Result<(), NvmeBlockError> {
-        let handle_guard = self
-            .actor_handle
-            .lock()
-            .expect("actor_handle lock poisoned");
-        let handle = handle_guard.as_ref().ok_or_else(|| {
-            NvmeBlockError::NotInitialized("call initialize() before flush_io()".into())
-        })?;
-        handle
-            .send(ControlMessage::Poll)
-            .map_err(|e| NvmeBlockError::NotInitialized(format!("actor send failed: {e}")))
+impl IBlockDeviceAdmin for BlockDeviceSpdkNvmeComponentV1 {
+    fn set_pci_address(&self, addr: PciAddress) {
+        // Inherent method is `pub(crate)`; call it here (impl is in same crate).
+        self.set_pci_address(addr);
+    }
+
+    fn initialize(&self) -> Result<(), NvmeBlockError> {
+        self.initialize()
     }
 }
 
@@ -341,9 +304,8 @@ impl IBlockDevice for BlockDeviceSpdkNvmeComponentV1 {
     /// Create a new client connection, returning channel endpoints.
     ///
     /// The returned [`ClientChannels`] contain a `command_tx` for submitting
-    /// IO commands and a `completion_rx` for receiving completions. After
-    /// sending commands, callers must invoke [`flush_io()`](Self::flush_io)
-    /// to wake the actor thread for prompt processing.
+    /// IO commands and a `completion_rx` for receiving completions. The actor
+    /// thread self-polls and processes commands automatically.
     fn connect_client(&self) -> Result<ClientChannels, NvmeBlockError> {
         let handle_guard = self
             .actor_handle

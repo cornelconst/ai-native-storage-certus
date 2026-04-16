@@ -118,10 +118,13 @@ fn get_spdk_context() -> Option<&'static SpdkHardwareContext> {
                 dev: spdk_addr.dev,
                 func: spdk_addr.func,
             };
-            block_dev.set_pci_address(addr);
+
+            let admin = query::<dyn block_device_spdk_nvme::IBlockDeviceAdmin + Send + Sync>(&*block_dev)
+                .expect("IBlockDeviceAdmin query");
+            admin.set_pci_address(addr);
 
             // Initialize the block device (probe controller, start actor).
-            if let Err(e) = block_dev.initialize() {
+            if let Err(e) = admin.initialize() {
                 eprintln!("Block device initialize failed: {e}");
                 return None;
             }
@@ -271,7 +274,6 @@ fn namespace_probe() {
         .command_tx
         .send(block_device_spdk_nvme::Command::NsProbe)
         .expect("send NsProbe failed");
-    ctx.block_dev.flush_io().expect("flush_io");
 
     let completion = channels.completion_rx.recv().expect("recv failed");
     let namespaces = match completion {
@@ -300,7 +302,6 @@ fn write_read_roundtrip() {
         .command_tx
         .send(block_device_spdk_nvme::Command::NsProbe)
         .expect("send NsProbe failed");
-    ctx.block_dev.flush_io().expect("flush_io");
 
     let completion = channels.completion_rx.recv().expect("recv failed");
     let namespaces = match completion {
@@ -328,7 +329,6 @@ fn write_read_roundtrip() {
             buf: write_buf,
         })
         .expect("send WriteSync failed");
-    ctx.block_dev.flush_io().expect("flush_io");
 
     let completion = channels.completion_rx.recv().expect("recv failed");
     match completion {
@@ -351,7 +351,6 @@ fn write_read_roundtrip() {
             buf: std::sync::Arc::clone(&read_buf),
         })
         .expect("send ReadSync failed");
-    ctx.block_dev.flush_io().expect("flush_io");
 
     let completion = channels.completion_rx.recv().expect("recv failed");
     match completion {
@@ -372,15 +371,11 @@ fn write_read_roundtrip() {
 /// Helper: probe namespaces on a connected client and return the namespace list.
 ///
 /// Panics if the probe fails or returns an unexpected completion type.
-fn probe_namespaces(
-    channels: &interfaces::ClientChannels,
-    block_dev: &BlockDeviceSpdkNvmeComponentV1,
-) -> Vec<interfaces::NamespaceInfo> {
+fn probe_namespaces(channels: &interfaces::ClientChannels) -> Vec<interfaces::NamespaceInfo> {
     channels
         .command_tx
         .send(block_device_spdk_nvme::Command::NsProbe)
         .expect("send NsProbe failed");
-    block_dev.flush_io().expect("flush_io");
 
     match channels.completion_rx.recv().expect("recv failed") {
         block_device_spdk_nvme::Completion::NsProbeResult { namespaces } => namespaces,
@@ -388,22 +383,13 @@ fn probe_namespaces(
     }
 }
 
-/// Helper: flush and poll until a completion arrives.
+/// Helper: wait for a completion to arrive on the callback channel.
 ///
-/// Async SPDK operations may not complete within a single `flush_io()` cycle,
-/// so this loops calling `flush_io()` + `try_recv()` until the actor delivers
-/// the completion.
-fn flush_until_completion(
-    block_dev: &BlockDeviceSpdkNvmeComponentV1,
+/// The actor self-polls, so we just block on `recv()`.
+fn wait_for_completion(
     channels: &interfaces::ClientChannels,
 ) -> block_device_spdk_nvme::Completion {
-    loop {
-        block_dev.flush_io().expect("flush_io");
-        if let Ok(c) = channels.completion_rx.try_recv() {
-            return c;
-        }
-        std::thread::yield_now();
-    }
+    channels.completion_rx.recv().expect("recv failed")
 }
 
 #[test]
@@ -415,7 +401,7 @@ fn sync_write_async_read_roundtrip() {
 
     let ibd = query::<dyn IBlockDevice + Send + Sync>(&*ctx.block_dev).unwrap();
     let channels = ibd.connect_client().expect("connect_client failed");
-    let namespaces = probe_namespaces(&channels, &ctx.block_dev);
+    let namespaces = probe_namespaces(&channels);
     assert!(!namespaces.is_empty(), "no namespaces found");
     let ns = &namespaces[0];
     let sector_size = ns.sector_size as usize;
@@ -435,7 +421,6 @@ fn sync_write_async_read_roundtrip() {
             buf: write_buf,
         })
         .expect("send WriteSync failed");
-    ctx.block_dev.flush_io().expect("flush_io");
 
     match channels.completion_rx.recv().expect("recv failed") {
         block_device_spdk_nvme::Completion::WriteDone { result, .. } => {
@@ -459,7 +444,7 @@ fn sync_write_async_read_roundtrip() {
         })
         .expect("send ReadAsync failed");
 
-    match flush_until_completion(&ctx.block_dev, &channels) {
+    match wait_for_completion(&channels) {
         block_device_spdk_nvme::Completion::ReadDone { result, .. } => {
             result.expect("async read failed")
         }
@@ -485,7 +470,7 @@ fn write_on_one_client_read_on_another() {
 
     // Client A: write.
     let client_a = ibd.connect_client().expect("connect_client A failed");
-    let namespaces = probe_namespaces(&client_a, &ctx.block_dev);
+    let namespaces = probe_namespaces(&client_a);
     assert!(!namespaces.is_empty(), "no namespaces found");
     let ns = &namespaces[0];
     let sector_size = ns.sector_size as usize;
@@ -504,7 +489,6 @@ fn write_on_one_client_read_on_another() {
             buf: write_buf,
         })
         .expect("send WriteSync failed");
-    ctx.block_dev.flush_io().expect("flush_io");
 
     match client_a.completion_rx.recv().expect("recv failed") {
         block_device_spdk_nvme::Completion::WriteDone { result, .. } => {
@@ -527,12 +511,9 @@ fn write_on_one_client_read_on_another() {
             buf: Arc::clone(&read_buf),
         })
         .expect("send ReadSync failed");
-    ctx.block_dev.flush_io().expect("flush_io");
 
     match client_b.completion_rx.recv().expect("recv failed") {
-        block_device_spdk_nvme::Completion::ReadDone { result, .. } => {
-            result.expect("read failed")
-        }
+        block_device_spdk_nvme::Completion::ReadDone { result, .. } => result.expect("read failed"),
         other => panic!("expected ReadDone, got {other:?}"),
     }
 
@@ -555,7 +536,7 @@ fn multi_thread_concurrent_io() {
 
     // Probe once to get namespace info.
     let probe_channels = ibd.connect_client().expect("connect_client probe failed");
-    let namespaces = probe_namespaces(&probe_channels, &ctx.block_dev);
+    let namespaces = probe_namespaces(&probe_channels);
     assert!(!namespaces.is_empty(), "no namespaces found");
     let ns = namespaces[0].clone();
     drop(probe_channels);
@@ -570,7 +551,6 @@ fn multi_thread_concurrent_io() {
             let ibd = query::<dyn IBlockDevice + Send + Sync>(&*block_dev).unwrap();
             let channels = ibd.connect_client().expect("connect_client failed");
             let ns = ns.clone();
-            let block_dev = Arc::clone(&block_dev);
 
             std::thread::spawn(move || {
                 // Each thread writes to a unique LBA range to avoid conflicts.
@@ -596,7 +576,6 @@ fn multi_thread_concurrent_io() {
                             buf: wbuf,
                         })
                         .expect("send WriteSync failed");
-                    block_dev.flush_io().expect("flush_io");
 
                     match channels.completion_rx.recv().expect("recv failed") {
                         block_device_spdk_nvme::Completion::WriteDone { result, .. } => {
@@ -618,7 +597,6 @@ fn multi_thread_concurrent_io() {
                             buf: Arc::clone(&rbuf),
                         })
                         .expect("send ReadSync failed");
-                    block_dev.flush_io().expect("flush_io");
 
                     match channels.completion_rx.recv().expect("recv failed") {
                         block_device_spdk_nvme::Completion::ReadDone { result, .. } => {

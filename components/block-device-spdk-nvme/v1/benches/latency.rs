@@ -14,30 +14,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 
-use block_device_spdk_nvme::qpair::QueuePairPool;
 use block_device_spdk_nvme::Command;
-
-/// Benchmark queue pair selection heuristic at varying batch sizes.
-///
-/// This measures the overhead of the selection algorithm itself
-/// (no SPDK hardware required).
-fn qpair_selection_latency(c: &mut Criterion) {
-    let pool = QueuePairPool::from_detached(&[4, 16, 64, 256]);
-
-    let mut group = c.benchmark_group("qpair_selection");
-    for batch_size in [1, 4, 16, 64] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(batch_size),
-            &batch_size,
-            |b, &size| {
-                b.iter(|| {
-                    let _idx = pool.select_index(size);
-                });
-            },
-        );
-    }
-    group.finish();
-}
 
 /// Benchmark command construction at varying queue depths.
 ///
@@ -105,13 +82,15 @@ fn sync_io_latency(c: &mut Criterion) {
     }
 
     let spdk_addr = devices[0].address;
-    block_dev.set_pci_address(interfaces::PciAddress {
+    let admin = query::<dyn interfaces::IBlockDeviceAdmin + Send + Sync>(&*block_dev)
+        .expect("IBlockDeviceAdmin query");
+    admin.set_pci_address(interfaces::PciAddress {
         domain: spdk_addr.domain,
         bus: spdk_addr.bus,
         dev: spdk_addr.dev,
         func: spdk_addr.func,
     });
-    if let Err(e) = block_dev.initialize() {
+    if let Err(e) = admin.initialize() {
         eprintln!("sync_io_latency: skipping — block device init failed: {e}");
         return;
     }
@@ -124,7 +103,6 @@ fn sync_io_latency(c: &mut Criterion) {
         .command_tx
         .send(Command::NsProbe)
         .expect("send NsProbe");
-    block_dev.flush_io().expect("flush_io");
     let completion = channels.completion_rx.recv().expect("recv");
     let namespaces = match completion {
         block_device_spdk_nvme::Completion::NsProbeResult { namespaces } => namespaces,
@@ -155,7 +133,6 @@ fn sync_io_latency(c: &mut Criterion) {
                         buf: std::sync::Arc::clone(&buf),
                     })
                     .expect("send ReadSync");
-                block_dev.flush_io().expect("flush_io");
 
                 let completion = channels.completion_rx.recv().expect("recv");
                 match completion {
@@ -180,7 +157,6 @@ fn sync_io_latency(c: &mut Criterion) {
                         buf: std::sync::Arc::clone(&buf),
                     })
                     .expect("send WriteSync");
-                block_dev.flush_io().expect("flush_io");
 
                 let completion = channels.completion_rx.recv().expect("recv");
                 match completion {
@@ -197,7 +173,6 @@ fn sync_io_latency(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    qpair_selection_latency,
     command_construction_latency,
     sync_io_latency,
 );

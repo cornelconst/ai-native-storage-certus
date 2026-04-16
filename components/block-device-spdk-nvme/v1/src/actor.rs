@@ -140,6 +140,8 @@ pub(crate) struct BlockDeviceHandler {
     /// Telemetry stats collector (feature-gated).
     #[cfg(feature = "telemetry")]
     pub telemetry: Arc<TelemetryStats>,
+    /// Last time `check_timeouts()` was called, used to throttle to ~1ms.
+    last_timeout_check: Instant,
 }
 
 /// Completion context for synchronous SPDK NVMe commands.
@@ -180,7 +182,7 @@ unsafe extern "C" fn sync_completion_cb(
 
 impl BlockDeviceHandler {
     /// Create a new handler with the given controller.
-    pub fn new(controller: NvmeController) -> Self {
+    pub(crate) fn new(controller: NvmeController) -> Self {
         Self {
             controller,
             clients: Vec::new(),
@@ -188,18 +190,23 @@ impl BlockDeviceHandler {
             async_completions: Vec::new(),
             #[cfg(feature = "telemetry")]
             telemetry: Arc::new(TelemetryStats::new()),
+            last_timeout_check: Instant::now(),
         }
     }
 
     /// Create a new handler with the given controller and shared telemetry.
     #[cfg(feature = "telemetry")]
-    pub fn with_telemetry(controller: NvmeController, telemetry: Arc<TelemetryStats>) -> Self {
+    pub(crate) fn with_telemetry(
+        controller: NvmeController,
+        telemetry: Arc<TelemetryStats>,
+    ) -> Self {
         Self {
             controller,
             clients: Vec::new(),
             next_handle: 1,
             async_completions: Vec::new(),
             telemetry,
+            last_timeout_check: Instant::now(),
         }
     }
 
@@ -420,7 +427,10 @@ impl BlockDeviceHandler {
                     bytes: buf_guard.len() as u64,
                 });
 
-                let qp = controller.qpairs.get_mut(qp_idx).expect("qpair index valid");
+                let qp = controller
+                    .qpairs
+                    .get_mut(qp_idx)
+                    .expect("qpair index valid");
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_read(
                         ns_ptr,
@@ -492,7 +502,10 @@ impl BlockDeviceHandler {
                     bytes: buf.len() as u64,
                 });
 
-                let qp = controller.qpairs.get_mut(qp_idx).expect("qpair index valid");
+                let qp = controller
+                    .qpairs
+                    .get_mut(qp_idx)
+                    .expect("qpair index valid");
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_write(
                         ns_ptr,
@@ -850,13 +863,13 @@ impl BlockDeviceHandler {
 
     /// Get a reference to the controller.
     #[allow(dead_code)]
-    pub fn controller(&self) -> &NvmeController {
+    pub(crate) fn controller(&self) -> &NvmeController {
         &self.controller
     }
 
     /// Get a mutable reference to the controller.
     #[allow(dead_code)]
-    pub fn controller_mut(&mut self) -> &mut NvmeController {
+    pub(crate) fn controller_mut(&mut self) -> &mut NvmeController {
         &mut self.controller
     }
 }
@@ -876,9 +889,6 @@ impl ActorHandler<ControlMessage> for BlockDeviceHandler {
                     self.clients.swap_remove(pos);
                 }
             }
-            ControlMessage::Poll => {
-                // No-op — poll_clients() is called after the match.
-            }
         }
 
         // After processing the control message, poll all clients.
@@ -886,6 +896,18 @@ impl ActorHandler<ControlMessage> for BlockDeviceHandler {
 
         // Check for timed-out operations.
         self.check_timeouts();
+    }
+
+    fn on_idle(&mut self) {
+        self.poll_clients();
+        // Throttle timeout checks to ~1ms — check_timeouts() allocates a Vec
+        // and calls Instant::now() for every pending op, which is too expensive
+        // to run on every poll iteration (millions/sec).
+        let now = Instant::now();
+        if now.duration_since(self.last_timeout_check).as_millis() >= 1 {
+            self.check_timeouts();
+            self.last_timeout_check = now;
+        }
     }
 
     fn on_start(&mut self) {

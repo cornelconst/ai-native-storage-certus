@@ -205,6 +205,11 @@ pub struct DmaBuffer {
     metadata: BTreeMap<String, String>,
 }
 
+/// Type alias for a pluggable DMA buffer allocator.
+/// Signature: `(size, alignment, numa_node) -> Result<DmaBuffer, String>`.
+pub type DmaAllocFn =
+    std::sync::Arc<dyn Fn(usize, usize, Option<i32>) -> Result<DmaBuffer, String> + Send + Sync>;
+
 // SAFETY: The underlying hugepage memory has no thread affinity.
 // It is valid from any thread once allocated.
 unsafe impl Send for DmaBuffer {}

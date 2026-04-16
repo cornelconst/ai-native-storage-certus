@@ -67,11 +67,15 @@ Undefined behavior is never acceptable.
 
 - All components MUST conform to the `components/component-framework`
   methodology for defining interfaces, receptacles, and bindings.
-- Components MUST use the actor model with dedicated service threads.
-- Shared-memory channels MUST be used for inter-component messaging
+- Component MUST use the actor model with dedicated service threads.
+- Actor component MUST use shared-memory channels for inter-component messaging
   (ingress commands, asynchronous completion callbacks).
-- Components MUST declare dependencies through receptacles (e.g.,
+- Component MUST declare dependencies through receptacles (e.g.,
   `ILogger`) rather than hard-coding them.
+- Component should provide `IUnknown`
+- Component should only expose functions through interfaces.  Public functions outside the component are not allowed.
+- Make sure tests and benchmarks run with or without SPDK hardware. If no hardware is present the tests pass but do nothing.
+
 
 ## Platform and Toolchain Constraints
 

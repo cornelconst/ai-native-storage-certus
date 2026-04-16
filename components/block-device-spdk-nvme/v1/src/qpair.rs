@@ -46,6 +46,7 @@ impl QueuePair {
     /// let qp = QueuePair::new_detached(64);
     /// assert_eq!(qp.depth(), 64);
     /// ```
+    #[cfg(test)]
     pub fn new_detached(depth: u32) -> Self {
         Self {
             qpair_ptr: std::ptr::null_mut(),
@@ -54,12 +55,12 @@ impl QueuePair {
         }
     }
 
-    /// Configured queue depth.
+    #[allow(dead_code)]
     pub fn depth(&self) -> u32 {
         self.depth
     }
 
-    /// Number of currently in-flight operations.
+    #[allow(dead_code)]
     pub fn in_flight(&self) -> u32 {
         self.in_flight
     }
@@ -83,7 +84,7 @@ impl QueuePair {
         self.in_flight += 1;
     }
 
-    /// Record that an operation completed.
+    #[allow(dead_code)]
     pub fn complete(&mut self) {
         self.in_flight = self.in_flight.saturating_sub(1);
     }
@@ -206,16 +207,7 @@ impl QueuePairPool {
         Ok(Self { qpairs })
     }
 
-    /// Create a pool from detached queue pairs (for testing).
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use block_device_spdk_nvme::qpair::QueuePairPool;
-    ///
-    /// let pool = QueuePairPool::from_detached(&[4, 16, 64]);
-    /// assert_eq!(pool.len(), 3);
-    /// ```
+    #[cfg(test)]
     pub fn from_detached(depths: &[u32]) -> Self {
         let qpairs = depths.iter().map(|&d| QueuePair::new_detached(d)).collect();
         Self { qpairs }
@@ -226,12 +218,12 @@ impl QueuePairPool {
         self.qpairs.len()
     }
 
-    /// Whether the pool is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.qpairs.is_empty()
     }
 
-    /// Get a queue pair by index.
+    #[allow(dead_code)]
     pub fn get(&self, index: usize) -> Option<&QueuePair> {
         self.qpairs.get(index)
     }
