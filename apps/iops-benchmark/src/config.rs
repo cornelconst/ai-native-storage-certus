@@ -24,6 +24,24 @@ impl fmt::Display for OpType {
     }
 }
 
+/// IO submission mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum IoMode {
+    /// Synchronous: each command blocks the actor until SPDK completion.
+    Sync,
+    /// Asynchronous: commands are submitted to SPDK and completed via callback.
+    Async,
+}
+
+impl fmt::Display for IoMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            IoMode::Sync => write!(f, "sync"),
+            IoMode::Async => write!(f, "async"),
+        }
+    }
+}
+
 /// IO access pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Pattern {
@@ -77,6 +95,10 @@ pub struct BenchConfig {
     /// IO access pattern: random or sequential.
     #[arg(long, default_value = "random", value_enum)]
     pub pattern: Pattern,
+
+    /// IO submission mode: sync or async.
+    #[arg(long, default_value = "async", value_enum)]
+    pub io_mode: IoMode,
 
     /// Suppress per-second progress output.
     #[arg(long, default_value_t = false)]
@@ -158,6 +180,7 @@ mod tests {
             ns_id: 1,
             pci_addr: None,
             pattern: Pattern::Random,
+            io_mode: IoMode::Async,
             quiet: false,
         };
         assert!(config.validate(512, 256, &sample_ns_list()).is_ok());
@@ -174,6 +197,7 @@ mod tests {
             ns_id: 1,
             pci_addr: None,
             pattern: Pattern::Random,
+            io_mode: IoMode::Async,
             quiet: false,
         };
         let err = config.validate(512, 256, &sample_ns_list()).unwrap_err();
@@ -191,6 +215,7 @@ mod tests {
             ns_id: 5,
             pci_addr: None,
             pattern: Pattern::Random,
+            io_mode: IoMode::Async,
             quiet: false,
         };
         let err = config.validate(512, 256, &sample_ns_list()).unwrap_err();
@@ -208,6 +233,7 @@ mod tests {
             ns_id: 1,
             pci_addr: None,
             pattern: Pattern::Random,
+            io_mode: IoMode::Async,
             quiet: false,
         };
         config.clamp_queue_depth(256);
@@ -225,6 +251,7 @@ mod tests {
             ns_id: 1,
             pci_addr: None,
             pattern: Pattern::Random,
+            io_mode: IoMode::Async,
             quiet: false,
         };
         config.clamp_queue_depth(256);
@@ -242,5 +269,11 @@ mod tests {
     fn pattern_display() {
         assert_eq!(format!("{}", Pattern::Random), "random");
         assert_eq!(format!("{}", Pattern::Sequential), "sequential");
+    }
+
+    #[test]
+    fn io_mode_display() {
+        assert_eq!(format!("{}", IoMode::Sync), "sync");
+        assert_eq!(format!("{}", IoMode::Async), "async");
     }
 }

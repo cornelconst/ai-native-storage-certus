@@ -396,8 +396,8 @@ impl BlockDeviceHandler {
                 }
                 let (ns_ptr, num_blocks) = validation.unwrap();
 
-                // Insert pending op with deadline.
-                let qp_idx = controller.qpairs.select_index(1);
+                // Select queue pair sized for this client's concurrency level.
+                let qp_idx = controller.qpairs.select_index(pending_ops.len() + 1);
                 pending_ops.insert(
                     handle,
                     PendingOp {
@@ -420,7 +420,7 @@ impl BlockDeviceHandler {
                     bytes: buf_guard.len() as u64,
                 });
 
-                let qp = controller.qpairs.select_qpair(1);
+                let qp = controller.qpairs.get_mut(qp_idx).expect("qpair index valid");
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_read(
                         ns_ptr,
@@ -469,8 +469,8 @@ impl BlockDeviceHandler {
                 }
                 let (ns_ptr, num_blocks) = validation.unwrap();
 
-                // Insert pending op with deadline.
-                let qp_idx = controller.qpairs.select_index(1);
+                // Select queue pair sized for this client's concurrency level.
+                let qp_idx = controller.qpairs.select_index(pending_ops.len() + 1);
                 pending_ops.insert(
                     handle,
                     PendingOp {
@@ -492,7 +492,7 @@ impl BlockDeviceHandler {
                     bytes: buf.len() as u64,
                 });
 
-                let qp = controller.qpairs.select_qpair(1);
+                let qp = controller.qpairs.get_mut(qp_idx).expect("qpair index valid");
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_write(
                         ns_ptr,

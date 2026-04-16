@@ -8,7 +8,7 @@ use interfaces::{
     ClientChannels, Command, Completion, DmaBuffer, NamespaceInfo, NvmeBlockError,
 };
 
-use crate::config::{BenchConfig, OpType, Pattern};
+use crate::config::{BenchConfig, IoMode, OpType, Pattern};
 use crate::lba::{LbaGenerator, RandomLba, SequentialLba};
 use crate::stats::ThreadResult;
 
@@ -104,6 +104,10 @@ impl Worker {
                 break;
             }
 
+            // Always flush so the actor wakes up to poll SPDK for hardware
+            // completions — even when we have no new commands to submit.
+            let _ = flush_fn();
+
             // Drain completions (non-blocking).
             self.drain_completions(&mut result);
 
@@ -127,7 +131,6 @@ impl Worker {
             } else {
                 // Draining: flush to process remaining in-flight ops.
                 let _ = flush_fn();
-                // Give the actor time to process.
                 std::thread::yield_now();
             }
         }
@@ -135,26 +138,35 @@ impl Worker {
         result
     }
 
-    /// Submit a single async IO operation.
+    /// Submit a single IO operation (sync or async based on config).
     fn submit_one(&mut self, timeout_ms: u64) {
         let lba = self.lba_gen.next_lba();
         let slot = self.submit_count as usize % self.config.queue_depth as usize;
         let is_read = self.choose_is_read();
 
-        let cmd = if is_read {
-            Command::ReadAsync {
+        let cmd = match (self.config.io_mode, is_read) {
+            (IoMode::Async, true) => Command::ReadAsync {
                 ns_id: self.ns_info.ns_id,
                 lba,
                 buf: Arc::clone(&self.read_bufs[slot]),
                 timeout_ms,
-            }
-        } else {
-            Command::WriteAsync {
+            },
+            (IoMode::Async, false) => Command::WriteAsync {
                 ns_id: self.ns_info.ns_id,
                 lba,
                 buf: Arc::clone(&self.write_bufs[slot]),
                 timeout_ms,
-            }
+            },
+            (IoMode::Sync, true) => Command::ReadSync {
+                ns_id: self.ns_info.ns_id,
+                lba,
+                buf: Arc::clone(&self.read_bufs[slot]),
+            },
+            (IoMode::Sync, false) => Command::WriteSync {
+                ns_id: self.ns_info.ns_id,
+                lba,
+                buf: Arc::clone(&self.write_bufs[slot]),
+            },
         };
 
         if self.channels.command_tx.send(cmd).is_ok() {

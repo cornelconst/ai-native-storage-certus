@@ -14,6 +14,7 @@ pub fn print_config(config: &BenchConfig, pci_addr_str: &str, ns_info: &Namespac
         ns_info.ns_id, ns_info.num_sectors, ns_info.sector_size
     );
     println!("Operation:    {}", config.op);
+    println!("IO mode:      {}", config.io_mode);
     println!("Pattern:      {}", config.pattern);
     println!("Block size:   {} bytes", config.block_size);
     println!("Queue depth:  {}", config.queue_depth);
