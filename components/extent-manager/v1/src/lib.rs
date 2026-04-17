@@ -12,7 +12,7 @@ pub mod test_support;
 use std::sync::{Mutex, RwLock};
 
 use interfaces::{
-    DmaAllocFn, ExtentManagerError, IBlockDevice, IExtentManager, IExtentManagerAdmin,
+    DmaAllocFn, ExtentManagerError, IBlockDevice, IExtentManager, IExtentManagerAdmin, ILogger,
     NvmeBlockError, RecoveryResult,
 };
 
@@ -30,6 +30,7 @@ define_component! {
         provides: [IExtentManager, IExtentManagerAdmin],
         receptacles: {
             block_device: IBlockDevice,
+            logger: ILogger,
         },
         fields: {
             state: RwLock<Option<ExtentManagerState>>,
@@ -42,6 +43,22 @@ impl ExtentManagerComponentV1 {
     #[allow(dead_code)]
     pub(crate) fn new_inner() -> std::sync::Arc<Self> {
         ExtentManagerComponentV1::new_default()
+    }
+
+    pub(crate) fn get_logger(&self) -> Option<std::sync::Arc<dyn ILogger + Send + Sync>> {
+        self.logger.get().ok()
+    }
+
+    fn log_info(&self, msg: &str) {
+        if let Ok(log) = self.logger.get() {
+            log.info(msg);
+        }
+    }
+
+    fn log_debug(&self, msg: &str) {
+        if let Ok(log) = self.logger.get() {
+            log.debug(msg);
+        }
     }
 
     fn get_client(&self) -> Result<BlockDeviceClient, NvmeBlockError> {
@@ -81,6 +98,9 @@ impl ExtentManagerComponentV1 {
         }
 
         let slab_idx = state.add_slab_descriptor(size_class, start_lba);
+        self.log_debug(&format!(
+            "slab allocated: index={slab_idx}, size_class={size_class}, start_lba={start_lba}"
+        ));
 
         let bitmap_blocks = state.slabs[slab_idx].bitmap.serialize_to_blocks();
         for (i, block) in bitmap_blocks.iter().enumerate() {
@@ -116,6 +136,10 @@ impl IExtentManagerAdmin for ExtentManagerComponentV1 {
         slab_size_bytes: u32,
         ns_id: u32,
     ) -> Result<(), NvmeBlockError> {
+        self.log_info(&format!(
+            "initializing extent manager: total_size={}B, slab_size={}B, ns_id={}",
+            total_size_bytes, slab_size_bytes, ns_id
+        ));
         if total_size_bytes == 0 {
             return Err(NvmeBlockError::BlockDevice(
                 interfaces::BlockDeviceError::WriteFailed("total_size_bytes must be > 0".into()),
@@ -145,11 +169,16 @@ impl IExtentManagerAdmin for ExtentManagerComponentV1 {
         client.write_block(ns_id, SUPERBLOCK_LBA, &sb.serialize())?;
 
         let em_state = ExtentManagerState::new(total_blocks, slab_size_blocks, ns_id);
+        self.log_debug(&format!(
+            "extent manager initialized: total_blocks={}, slab_size_blocks={}",
+            total_blocks, slab_size_blocks
+        ));
         *self.state.write().unwrap() = Some(em_state);
         Ok(())
     }
 
     fn open(&self, ns_id: u32) -> Result<RecoveryResult, NvmeBlockError> {
+        self.log_info(&format!("opening extent manager on ns_id={ns_id}"));
         let client = self.get_client()?;
 
         let sb_data = client.read_block(ns_id, SUPERBLOCK_LBA)?;
@@ -174,7 +203,7 @@ impl IExtentManagerAdmin for ExtentManagerComponentV1 {
             slab.bitmap = AllocationBitmap::deserialize_from_blocks(&bitmap_blocks, slab.num_slots);
         }
 
-        let result = recovery::recover(&client, &mut em_state.slabs, ns_id)?;
+        let result = recovery::recover(&client, &mut em_state.slabs, ns_id, self.get_logger())?;
 
         for slab in &em_state.slabs {
             for slot in 0..slab.num_slots {
@@ -190,6 +219,10 @@ impl IExtentManagerAdmin for ExtentManagerComponentV1 {
             }
         }
 
+        self.log_info(&format!(
+            "extent manager opened: {} extents loaded, {} orphans cleaned, {} corrupt records",
+            result.extents_loaded, result.orphans_cleaned, result.corrupt_records
+        ));
         *self.state.write().unwrap() = Some(em_state);
         Ok(result)
     }
@@ -272,6 +305,9 @@ impl IExtentManager for ExtentManagerComponentV1 {
         }
 
         let serialized = meta.serialize();
+        self.log_debug(&format!(
+            "extent created: key={key}, size_class={size_class}, lba={offset_lba}"
+        ));
         state.index.insert(key, meta);
 
         Ok(serialized)
@@ -314,6 +350,7 @@ impl IExtentManager for ExtentManagerComponentV1 {
             .write_block(state.namespace_id, meta.offset_lba, &zero)
             .map_err(error::nvme_to_em)?;
 
+        self.log_debug(&format!("extent removed: key={key}"));
         state.index.remove(&key);
         Ok(())
     }
