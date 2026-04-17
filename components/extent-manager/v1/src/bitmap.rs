@@ -32,6 +32,7 @@ impl AllocationBitmap {
         }
     }
 
+    #[allow(dead_code)]
     pub fn is_set(&self, index: u32) -> bool {
         let (word_idx, bit_idx) = Self::position(index);
         if word_idx < self.words.len() {
@@ -79,6 +80,7 @@ impl AllocationBitmap {
         blocks
     }
 
+    #[allow(dead_code)]
     pub fn deserialize_from_blocks(blocks: &[[u8; BLOCK_SIZE]], num_slots: u32) -> Self {
         let num_words = (num_slots as usize).div_ceil(BITS_PER_WORD);
         let mut words = Vec::with_capacity(num_words);

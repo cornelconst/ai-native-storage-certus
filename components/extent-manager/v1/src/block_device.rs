@@ -47,6 +47,7 @@ impl BlockDeviceClient {
         }
     }
 
+    #[allow(dead_code)]
     pub fn read_block(&self, ns_id: u32, lba: u64) -> Result<[u8; BLOCK_SIZE], NvmeBlockError> {
         let buf = self.alloc_buffer()?;
         let buf = Arc::new(Mutex::new(buf));

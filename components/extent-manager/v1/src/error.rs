@@ -9,12 +9,8 @@ pub(crate) fn key_not_found(key: u64) -> ExtentManagerError {
     ExtentManagerError::KeyNotFound(key)
 }
 
-pub(crate) fn invalid_size_class(size: u32) -> ExtentManagerError {
-    ExtentManagerError::InvalidSizeClass(size)
-}
-
-pub(crate) fn out_of_space(size_class: u32) -> ExtentManagerError {
-    ExtentManagerError::OutOfSpace { size_class }
+pub(crate) fn out_of_space() -> ExtentManagerError {
+    ExtentManagerError::OutOfSpace
 }
 
 pub(crate) fn not_initialized(msg: &str) -> ExtentManagerError {
@@ -32,5 +28,5 @@ pub(crate) fn corrupt_metadata(msg: &str) -> ExtentManagerError {
 }
 
 pub(crate) fn nvme_to_em(e: NvmeBlockError) -> ExtentManagerError {
-    ExtentManagerError::from(e)
+    ExtentManagerError::IoError(e.to_string())
 }

@@ -438,31 +438,6 @@ define_interface! {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Extent manager admin
-// ---------------------------------------------------------------------------
-
-/// Result returned by extent-manager `open()` after recovery.
-#[derive(Debug, Clone)]
-pub struct RecoveryResult {
-    pub extents_loaded: u64,
-    pub orphans_cleaned: u64,
-    pub corrupt_records: u64,
-}
-
-define_interface! {
-    pub IExtentManagerAdmin {
-        /// Set the DMA allocator (test hook).
-        fn set_dma_alloc(&self, alloc: crate::spdk_types::DmaAllocFn);
-
-        /// Initialize a fresh extent manager on the device.
-        fn initialize(&self, total_size_bytes: u64, slab_size_bytes: u32, ns_id: u32) -> Result<(), NvmeBlockError>;
-
-        /// Open an existing extent manager and perform recovery.
-        fn open(&self, ns_id: u32) -> Result<RecoveryResult, NvmeBlockError>;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
