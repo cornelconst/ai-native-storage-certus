@@ -33,7 +33,3 @@ harness = false
 [[bench]]
 name = "lookup_benchmark"
 harness = false
-
-[[bench]]
-name = "iterate_benchmark"
-harness = false

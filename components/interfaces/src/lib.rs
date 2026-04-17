@@ -38,10 +38,8 @@ pub use iblock_device::{
 
 #[cfg(feature = "spdk")]
 pub use iblock_device::IBlockDeviceAdmin;
-#[cfg(feature = "spdk")]
-pub use iblock_device::IExtentManagerAdmin;
-#[cfg(feature = "spdk")]
-pub use iblock_device::RecoveryResult;
 
+pub use iextent_manager::Extent;
 pub use iextent_manager::ExtentManagerError;
+#[cfg(feature = "spdk")]
 pub use iextent_manager::IExtentManager;

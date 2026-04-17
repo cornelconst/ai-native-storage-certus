@@ -90,18 +90,18 @@ fn main() {
             std::process::exit(2);
         });
 
+    let iem =
+        query::<dyn interfaces::IExtentManager + Send + Sync>(&*extent_mgr).unwrap_or_else(|| {
+            eprintln!("error: failed to query IExtentManager");
+            std::process::exit(2);
+        });
+
     let numa_node = ibd.numa_node();
     let dma_alloc: interfaces::DmaAllocFn = Arc::new(move |size, align, _numa| {
         DmaBuffer::new(size, align, Some(numa_node)).map_err(|e| e.to_string())
     });
 
-    let em_admin = query::<dyn interfaces::IExtentManagerAdmin + Send + Sync>(&*extent_mgr)
-        .unwrap_or_else(|| {
-            eprintln!("error: failed to query IExtentManagerAdmin");
-            std::process::exit(2);
-        });
-
-    em_admin.set_dma_alloc(dma_alloc);
+    iem.set_dma_alloc(dma_alloc);
 
     let total_size = config.total_size.unwrap_or_else(|| {
         let sectors = ibd.num_sectors(config.ns_id).unwrap_or_else(|e| {
@@ -115,16 +115,10 @@ fn main() {
         sectors * sector_size as u64
     });
 
-    if let Err(e) = em_admin.initialize(total_size, config.slab_size, config.ns_id) {
+    if let Err(e) = iem.initialize(total_size, config.slab_size) {
         eprintln!("error: extent manager init failed: {e}");
         std::process::exit(2);
     }
-
-    let iem =
-        query::<dyn interfaces::IExtentManager + Send + Sync>(&*extent_mgr).unwrap_or_else(|| {
-            eprintln!("error: failed to query IExtentManager");
-            std::process::exit(2);
-        });
 
     report::print_header(&config, total_size);
 
@@ -242,7 +236,7 @@ fn run_create(
     for i in 0..count {
         let key = key_start + i;
         let start = Instant::now();
-        match iem.create_extent(key, size_class, "", 0, false) {
+        match iem.create_extent(key, size_class, "", 0) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("  create_extent({key}) failed: {e}");

@@ -1,10 +1,31 @@
 use std::collections::HashMap;
 
 use crate::bitmap::AllocationBitmap;
-use crate::metadata::ExtentMetadata;
-use crate::superblock::compute_slab_layout;
+use crate::metadata::{ExtentMetadata, BLOCK_SIZE};
+
+pub(crate) const MAX_SLABS: usize = 256;
+const BITS_PER_BLOCK: usize = BLOCK_SIZE * 8;
+
+pub(crate) fn compute_slab_layout(slab_size_blocks: u32) -> (u32, u32) {
+    let total = slab_size_blocks as usize;
+    if total < 2 {
+        return (0, 0);
+    }
+    let mut num_slots = total - 1;
+    loop {
+        let bitmap_blocks = num_slots.div_ceil(BITS_PER_BLOCK);
+        let available = total - bitmap_blocks;
+        if available <= num_slots {
+            num_slots = available;
+            let bitmap_blocks = num_slots.div_ceil(BITS_PER_BLOCK);
+            return (bitmap_blocks as u32, num_slots as u32);
+        }
+        num_slots = available;
+    }
+}
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) struct SlabDescriptor {
     pub slab_index: usize,
     pub size_class: u32,
@@ -35,26 +56,22 @@ impl SlabDescriptor {
 }
 
 #[derive(Debug)]
-pub(crate) struct ExtentManagerState {
-    pub index: HashMap<u64, ExtentMetadata>,
-    pub slabs: Vec<SlabDescriptor>,
-    pub size_class_slabs: HashMap<u32, Vec<usize>>,
+pub(crate) struct PoolState {
     pub total_blocks: u64,
     pub slab_size_blocks: u32,
+    pub slabs: Vec<SlabDescriptor>,
+    pub size_class_slabs: HashMap<u32, Vec<usize>>,
     pub next_free_lba: u64,
-    pub namespace_id: u32,
 }
 
-impl ExtentManagerState {
-    pub fn new(total_blocks: u64, slab_size_blocks: u32, namespace_id: u32) -> Self {
-        ExtentManagerState {
-            index: HashMap::new(),
-            slabs: Vec::new(),
-            size_class_slabs: HashMap::new(),
+impl PoolState {
+    pub fn new(total_blocks: u64, slab_size_blocks: u32) -> Self {
+        PoolState {
             total_blocks,
             slab_size_blocks,
-            next_free_lba: 1, // LBA 0 = superblock
-            namespace_id,
+            slabs: Vec::new(),
+            size_class_slabs: HashMap::new(),
+            next_free_lba: 0,
         }
     }
 
@@ -70,7 +87,7 @@ impl ExtentManagerState {
     }
 
     pub fn can_allocate_slab(&self) -> bool {
-        self.slabs.len() < crate::superblock::MAX_SLABS
+        self.slabs.len() < MAX_SLABS
             && self.next_free_lba + self.slab_size_blocks as u64 <= self.total_blocks
     }
 
@@ -85,8 +102,56 @@ impl ExtentManagerState {
         self.next_free_lba = start_lba + self.slab_size_blocks as u64;
         idx
     }
+}
 
-    pub fn total_extents(&self) -> u64 {
-        self.index.len() as u64
+#[derive(Debug, Default)]
+pub(crate) struct ExtentManagerState {
+    pub index: HashMap<u64, ExtentMetadata>,
+    pub pool: Option<PoolState>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compute_slab_layout_1gib() {
+        let slab_blocks = 262144u32;
+        let (bitmap_blocks, num_slots) = compute_slab_layout(slab_blocks);
+        assert_eq!(bitmap_blocks + num_slots as u32, slab_blocks);
+        assert!(num_slots > 0);
+        assert!(bitmap_blocks > 0);
+        assert!(num_slots.div_ceil(BITS_PER_BLOCK as u32) <= bitmap_blocks);
+    }
+
+    #[test]
+    fn compute_slab_layout_minimum() {
+        let (bitmap_blocks, num_slots) = compute_slab_layout(2);
+        assert_eq!(bitmap_blocks, 1);
+        assert_eq!(num_slots, 1);
+    }
+
+    #[test]
+    fn compute_slab_layout_too_small() {
+        let (bitmap_blocks, num_slots) = compute_slab_layout(1);
+        assert_eq!(bitmap_blocks, 0);
+        assert_eq!(num_slots, 0);
+    }
+
+    #[test]
+    fn pool_state_find_free_slot() {
+        let mut pool = PoolState::new(1000, 10);
+        pool.add_slab_descriptor(131072, 0);
+        let result = pool.find_free_slot(131072);
+        assert!(result.is_some());
+        assert!(pool.find_free_slot(999).is_none());
+    }
+
+    #[test]
+    fn pool_state_can_allocate_slab() {
+        let pool = PoolState::new(20, 10);
+        assert!(pool.can_allocate_slab());
+        let pool2 = PoolState::new(5, 10);
+        assert!(!pool2.can_allocate_slab());
     }
 }
