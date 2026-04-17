@@ -1,29 +1,28 @@
-use std::sync::Arc;
-
 use criterion::{criterion_group, criterion_main, Criterion};
-use extent_manager::test_support::{create_test_component, MockBlockDevice};
-use interfaces::IExtentManager;
+use extent_manager::test_support::create_test_component;
+use interfaces::{IExtentManager, IExtentManagerAdmin};
 
-fn lookup_extent_benchmark(c: &mut Criterion) {
-    let (comp, _mock): (
-        Arc<extent_manager::ExtentManagerComponentV1>,
-        Arc<MockBlockDevice>,
-    ) = create_test_component(1_000_000, &[131072], &[10_000]);
+fn bench_lookup_extent(c: &mut Criterion) {
+    let (component, _mock) = create_test_component();
+    component
+        .initialize(100 * 128 * 4096, 128 * 4096, 1)
+        .expect("initialize");
 
-    // Pre-populate 1000 extents.
-    for key in 1..=1000 {
-        comp.create_extent(key, 0, "", 0, false).unwrap();
+    for i in 0..10_000u64 {
+        component
+            .create_extent(i, 131072, "", 0, false)
+            .expect("create");
     }
 
-    let mut idx = 0u64;
-
     c.bench_function("lookup_extent", |b| {
+        let mut key = 0u64;
         b.iter(|| {
-            idx = (idx % 1000) + 1;
-            comp.lookup_extent(idx).unwrap();
+            let k = key % 10_000;
+            let _ = component.lookup_extent(k);
+            key += 1;
         });
     });
 }
 
-criterion_group!(benches, lookup_extent_benchmark);
+criterion_group!(benches, bench_lookup_extent);
 criterion_main!(benches);

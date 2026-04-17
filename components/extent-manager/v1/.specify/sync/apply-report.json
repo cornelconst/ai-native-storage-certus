@@ -1,0 +1,33 @@
+{
+  "applied": "2026-04-16",
+  "specs_updated": [
+    {
+      "spec": "001-extent-management",
+      "changes": [
+        {"requirement": "Status", "type": "modified"},
+        {"requirement": "Clarifications", "type": "modified"},
+        {"requirement": "US7", "type": "rewritten"},
+        {"requirement": "Edge Cases", "type": "rewritten"},
+        {"requirement": "FR-007", "type": "modified"},
+        {"requirement": "FR-015", "type": "modified"},
+        {"requirement": "SC-005", "type": "modified"},
+        {"requirement": "Key Entities", "type": "rewritten"},
+        {"requirement": "Assumptions", "type": "modified"}
+      ]
+    },
+    {
+      "spec": "002-extent-benchmark",
+      "changes": [
+        {"requirement": "FR-009", "type": "modified"},
+        {"requirement": "SC-003", "type": "modified"}
+      ]
+    }
+  ],
+  "new_specs": [],
+  "tasks_generated": 2,
+  "tasks_file": ".specify/sync/align-tasks.md",
+  "backups": [
+    ".specify/sync/backups/001-spec.md.bak",
+    ".specify/sync/backups/002-spec.md.bak"
+  ]
+}

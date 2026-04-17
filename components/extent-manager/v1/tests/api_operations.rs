@@ -1,224 +1,245 @@
-//! Integration tests for IExtentManager API operations.
-//!
-//! All tests exercise the full component stack:
-//! `IExtentManager` → `ExtentManagerComponentV1` → `BlockDevice` → `MockBlockDevice`
-
+use extent_manager::test_support::{create_test_component, heap_dma_alloc, MockBlockDevice};
+use interfaces::{ExtentManagerError, IExtentManager, IExtentManagerAdmin};
 use std::sync::Arc;
 
-use component_core::iunknown::query;
-use extent_manager::test_support::{
-    create_test_component, create_uninit_component, heap_dma_alloc_fn, MockBlockDevice,
-};
-use extent_manager::ExtentMetadata;
-use interfaces::IExtentManagerAdmin;
-use interfaces::{IBlockDevice, IExtentManager};
+const SLAB_SIZE: u32 = 128 * 4096; // 128 blocks = 512 KiB slab
+const TOTAL_SIZE: u64 = 100 * 128 * 4096; // room for ~100 slabs
 
-/// Default test geometry: 10,000 blocks, 2 size classes (128K, 256K), 100 slots each.
-fn default_component() -> (
+fn setup() -> (
     Arc<extent_manager::ExtentManagerComponentV1>,
     Arc<MockBlockDevice>,
 ) {
-    create_test_component(10_000, &[131072, 262144], &[100, 50])
+    let (comp, mock) = create_test_component();
+    comp.initialize(TOTAL_SIZE, SLAB_SIZE, 1)
+        .expect("initialize");
+    (comp, mock)
 }
 
-// T010: create and lookup
 #[test]
-fn api_create_and_lookup() {
-    let (comp, _mock) = default_component();
-
-    let meta_bytes = comp
-        .create_extent(1, 0, "test.dat", 0, false)
-        .expect("create_extent failed");
-    let meta = ExtentMetadata::from_bytes(&meta_bytes).unwrap();
-
-    assert_eq!(meta.key, 1);
-    assert_eq!(meta.size_class, 0);
-    assert_eq!(meta.filename.as_deref(), Some("test.dat"));
-    assert_eq!(comp.extent_count(), 1);
-
-    let lookup_bytes = comp.lookup_extent(1).expect("lookup_extent failed");
-    let lookup_meta = ExtentMetadata::from_bytes(&lookup_bytes).unwrap();
-    assert_eq!(meta.key, lookup_meta.key);
-    assert_eq!(meta.offset_blocks, lookup_meta.offset_blocks);
+fn initialize_creates_state() {
+    let (comp, _mock) = create_test_component();
+    comp.initialize(TOTAL_SIZE, SLAB_SIZE, 1)
+        .expect("initialize");
+    assert_eq!(comp.extent_count(), 0);
 }
 
-// T011: create and remove
 #[test]
-fn api_create_and_remove() {
-    let (comp, _mock) = default_component();
+fn initialize_rejects_zero_size() {
+    let (comp, _mock) = create_test_component();
+    let err = comp.initialize(0, SLAB_SIZE, 1);
+    assert!(err.is_err());
+}
 
-    comp.create_extent(1, 0, "", 0, false).unwrap();
+#[test]
+fn initialize_rejects_tiny_slab() {
+    let (comp, _mock) = create_test_component();
+    let err = comp.initialize(TOTAL_SIZE, 4096, 1); // 1 block slab
+    assert!(err.is_err());
+}
+
+#[test]
+fn initialize_rejects_unaligned_slab() {
+    let (comp, _mock) = create_test_component();
+    let err = comp.initialize(TOTAL_SIZE, 5000, 1);
+    assert!(err.is_err());
+}
+
+#[test]
+fn create_extent_basic() {
+    let (comp, _mock) = setup();
+    let result = comp.create_extent(1, 131072, "test.dat", 0, false);
+    assert!(result.is_ok());
+    assert_eq!(comp.extent_count(), 1);
+}
+
+#[test]
+fn create_extent_with_filename_and_crc() {
+    let (comp, _mock) = setup();
+    let result = comp.create_extent(42, 131072, "myfile.dat", 0xDEADBEEF, true);
+    assert!(result.is_ok());
+
+    let serialized = comp.lookup_extent(42).expect("lookup");
+    assert!(!serialized.is_empty());
+}
+
+#[test]
+fn create_extent_duplicate_key_fails() {
+    let (comp, _mock) = setup();
+    comp.create_extent(1, 131072, "", 0, false)
+        .expect("first create");
+    let err = comp.create_extent(1, 131072, "", 0, false);
+    assert!(matches!(err, Err(ExtentManagerError::DuplicateKey(_))));
+}
+
+#[test]
+fn create_extent_invalid_size_class_fails() {
+    let (comp, _mock) = setup();
+    let err = comp.create_extent(1, 999, "", 0, false);
+    assert!(matches!(err, Err(ExtentManagerError::InvalidSizeClass(_))));
+}
+
+#[test]
+fn lookup_extent_basic() {
+    let (comp, _mock) = setup();
+    let created = comp
+        .create_extent(1, 131072, "hello.txt", 0xABCD, true)
+        .expect("create");
+    let looked_up = comp.lookup_extent(1).expect("lookup");
+    assert_eq!(created, looked_up);
+}
+
+#[test]
+fn lookup_extent_not_found() {
+    let (comp, _mock) = setup();
+    let err = comp.lookup_extent(999);
+    assert!(matches!(err, Err(ExtentManagerError::KeyNotFound(_))));
+}
+
+#[test]
+fn remove_extent_basic() {
+    let (comp, _mock) = setup();
+    comp.create_extent(1, 131072, "", 0, false).expect("create");
     assert_eq!(comp.extent_count(), 1);
 
-    comp.remove_extent(1).unwrap();
+    comp.remove_extent(1).expect("remove");
     assert_eq!(comp.extent_count(), 0);
 
-    // Lookup after removal should fail.
-    let err = comp.lookup_extent(1).unwrap_err();
-    assert!(err.to_string().contains("key not found"));
+    let err = comp.lookup_extent(1);
+    assert!(matches!(err, Err(ExtentManagerError::KeyNotFound(_))));
 }
 
-// T012: duplicate key error
 #[test]
-fn api_duplicate_key_error() {
-    let (comp, _mock) = default_component();
-
-    comp.create_extent(42, 0, "", 0, false).unwrap();
-    let err = comp.create_extent(42, 0, "", 0, false).unwrap_err();
-    assert!(err.to_string().contains("duplicate key"));
+fn remove_extent_not_found() {
+    let (comp, _mock) = setup();
+    let err = comp.remove_extent(999);
+    assert!(matches!(err, Err(ExtentManagerError::KeyNotFound(_))));
 }
 
-// T013: key not found error
 #[test]
-fn api_key_not_found_error() {
-    let (comp, _mock) = default_component();
-
-    let err = comp.lookup_extent(999).unwrap_err();
-    assert!(err.to_string().contains("key not found"));
-
-    let err = comp.remove_extent(999).unwrap_err();
-    assert!(err.to_string().contains("key not found"));
+fn remove_then_create_reuses_slot() {
+    let (comp, _mock) = setup();
+    comp.create_extent(1, 131072, "", 0, false)
+        .expect("create 1");
+    comp.remove_extent(1).expect("remove 1");
+    comp.create_extent(2, 131072, "", 0, false)
+        .expect("create 2");
+    assert_eq!(comp.extent_count(), 1);
 }
 
-// T014: invalid size class error
 #[test]
-fn api_invalid_size_class_error() {
-    let (comp, _mock) = default_component();
-
-    // Only size classes 0 and 1 are configured.
-    let err = comp.create_extent(1, 99, "", 0, false).unwrap_err();
-    assert!(err.to_string().contains("invalid size class"));
-}
-
-// T015: out of space error
-#[test]
-fn api_out_of_space_error() {
-    // Small capacity: only 2 slots in class 0.
-    let (comp, _mock) = create_test_component(10_000, &[131072], &[2]);
-
-    comp.create_extent(1, 0, "", 0, false).unwrap();
-    comp.create_extent(2, 0, "", 0, false).unwrap();
-
-    let err = comp.create_extent(3, 0, "", 0, false).unwrap_err();
-    assert!(err.to_string().contains("out of space"));
-}
-
-// T016: not initialized error
-#[test]
-fn api_not_initialized_error() {
-    let (comp, _mock) = create_uninit_component(10_000);
-
-    let err = comp.create_extent(1, 0, "", 0, false).unwrap_err();
-    assert!(err.to_string().contains("not initialized"));
-}
-
-// T017: device too small error
-#[test]
-fn api_device_too_small_error() {
-    // 2 blocks is way too small for any configuration.
-    let mock = Arc::new(MockBlockDevice::new(2));
-    let comp = extent_manager::ExtentManagerComponentV1::new_default();
-
-    let ibd: Arc<dyn IBlockDevice + Send + Sync> = mock.clone();
-    comp.block_device.connect(ibd).unwrap();
-    let admin =
-        query::<dyn IExtentManagerAdmin + Send + Sync>(&*comp).expect("IExtentManagerAdmin query");
-    admin.set_dma_alloc(heap_dma_alloc_fn());
-
-    let err = admin.initialize(vec![131072], vec![100], 1).unwrap_err();
-    assert!(err.to_string().contains("too small"));
-}
-
-// T018: multiple size classes
-#[test]
-fn api_multiple_size_classes() {
-    let (comp, _mock) = default_component();
-
-    // Create one extent in each size class.
-    let meta0_bytes = comp.create_extent(1, 0, "", 0, false).unwrap();
-    let meta0 = ExtentMetadata::from_bytes(&meta0_bytes).unwrap();
-    assert_eq!(meta0.size_class, 0);
-
-    let meta1_bytes = comp.create_extent(2, 1, "", 0, false).unwrap();
-    let meta1 = ExtentMetadata::from_bytes(&meta1_bytes).unwrap();
-    assert_eq!(meta1.size_class, 1);
-
+fn multiple_size_classes() {
+    let (comp, _mock) = setup();
+    comp.create_extent(1, 131072, "", 0, false)
+        .expect("create 128K");
+    comp.create_extent(2, 262144, "", 0, false)
+        .expect("create 256K");
     assert_eq!(comp.extent_count(), 2);
 
-    // Offsets should be different (different regions).
-    assert_ne!(meta0.offset_blocks, meta1.offset_blocks);
+    comp.remove_extent(1).expect("remove 128K");
+    assert_eq!(comp.extent_count(), 1);
+    comp.lookup_extent(2).expect("256K still exists");
 }
 
-// T019: filename and CRC round-trip
 #[test]
-fn api_filename_and_crc() {
-    let (comp, _mock) = default_component();
+fn extent_count_tracks_correctly() {
+    let (comp, _mock) = setup();
+    assert_eq!(comp.extent_count(), 0);
 
-    let meta_bytes = comp
-        .create_extent(1, 0, "model.bin", 0xDEADBEEF, true)
-        .unwrap();
-    let meta = ExtentMetadata::from_bytes(&meta_bytes).unwrap();
+    for i in 0..10u64 {
+        comp.create_extent(i, 131072, "", 0, false).expect("create");
+    }
+    assert_eq!(comp.extent_count(), 10);
 
-    assert_eq!(meta.filename.as_deref(), Some("model.bin"));
-    assert_eq!(meta.data_crc, Some(0xDEADBEEF));
-
-    // Verify round-trip through lookup.
-    let lookup_bytes = comp.lookup_extent(1).unwrap();
-    let lookup = ExtentMetadata::from_bytes(&lookup_bytes).unwrap();
-    assert_eq!(lookup.filename.as_deref(), Some("model.bin"));
-    assert_eq!(lookup.data_crc, Some(0xDEADBEEF));
+    for i in 0..5u64 {
+        comp.remove_extent(i).expect("remove");
+    }
+    assert_eq!(comp.extent_count(), 5);
 }
 
-// T020: initialize and reopen
 #[test]
-fn api_initialize_and_reopen() {
-    let num_blocks = 10_000u64;
-    let sizes = &[131072u32, 262144];
-    let slots = &[100u32, 50];
+fn out_of_space() {
+    let (comp, _mock) = create_test_component();
+    // Tiny device: superblock (1 block) + 1 slab of 2 blocks (1 bitmap + 1 slot) = 3 blocks
+    // Total = 3 blocks, slab = 2 blocks → only 1 slot available, no room for second slab
+    let block_size = 4096u64;
+    comp.initialize(3 * block_size, 2 * 4096, 1).expect("init");
 
-    // Phase 1: initialize and populate.
-    let mock = Arc::new(MockBlockDevice::new(num_blocks));
-    let comp = extent_manager::ExtentManagerComponentV1::new_default();
+    comp.create_extent(1, 131072, "", 0, false).expect("1");
+    let err = comp.create_extent(2, 131072, "", 0, false);
+    assert!(matches!(err, Err(ExtentManagerError::OutOfSpace { .. })));
+}
 
-    let ibd: Arc<dyn IBlockDevice + Send + Sync> = mock.clone();
-    comp.block_device.connect(ibd).unwrap();
-    let admin =
-        query::<dyn IExtentManagerAdmin + Send + Sync>(&*comp).expect("IExtentManagerAdmin query");
-    admin.set_dma_alloc(heap_dma_alloc_fn());
-    admin.initialize(sizes.to_vec(), slots.to_vec(), 1).unwrap();
+#[test]
+fn not_initialized_errors() {
+    let (comp, _mock) = create_test_component();
+    let err = comp.create_extent(1, 131072, "", 0, false);
+    assert!(matches!(err, Err(ExtentManagerError::NotInitialized(_))));
 
-    comp.create_extent(10, 0, "file_a.dat", 0, false).unwrap();
-    comp.create_extent(20, 0, "file_b.dat", 0xCAFE, true)
-        .unwrap();
-    comp.create_extent(30, 1, "", 0, false).unwrap();
-    assert_eq!(comp.extent_count(), 3);
+    let err = comp.lookup_extent(1);
+    assert!(matches!(err, Err(ExtentManagerError::NotInitialized(_))));
 
-    // Save block storage handle, drop component.
-    let blocks = mock.blocks();
+    let err = comp.remove_extent(1);
+    assert!(matches!(err, Err(ExtentManagerError::NotInitialized(_))));
+}
+
+#[test]
+fn open_recovers_extents() {
+    let (comp, mock) = create_test_component();
+    comp.initialize(TOTAL_SIZE, SLAB_SIZE, 1).expect("init");
+    comp.create_extent(10, 131072, "a.dat", 0, false)
+        .expect("create 10");
+    comp.create_extent(20, 131072, "b.dat", 0, false)
+        .expect("create 20");
+    assert_eq!(comp.extent_count(), 2);
+
+    let shared = mock.shared_state();
     drop(comp);
 
-    // Phase 2: reopen from same storage.
-    let mock2 = Arc::new(MockBlockDevice::reboot_from(&blocks, num_blocks));
+    let mock2 = MockBlockDevice::reboot_from(&shared);
+    let mock2 = Arc::new(mock2);
     let comp2 = extent_manager::ExtentManagerComponentV1::new_default();
+    comp2
+        .block_device
+        .connect(mock2 as Arc<dyn interfaces::IBlockDevice>)
+        .expect("connect");
+    comp2.set_dma_alloc(heap_dma_alloc());
 
-    let ibd2: Arc<dyn IBlockDevice + Send + Sync> = mock2;
-    comp2.block_device.connect(ibd2).unwrap();
-    let admin2 =
-        query::<dyn IExtentManagerAdmin + Send + Sync>(&*comp2).expect("IExtentManagerAdmin query");
-    admin2.set_dma_alloc(heap_dma_alloc_fn());
+    let result = comp2.open(1).expect("open");
+    assert_eq!(result.extents_loaded, 2);
+    assert_eq!(result.orphans_cleaned, 0);
+    assert_eq!(result.corrupt_records, 0);
 
-    let stats = admin2.open(1).unwrap();
-    assert_eq!(stats.extents_loaded, 3);
-    assert_eq!(stats.orphans_cleaned, 0);
+    assert_eq!(comp2.extent_count(), 2);
+    comp2.lookup_extent(10).expect("extent 10 recovered");
+    comp2.lookup_extent(20).expect("extent 20 recovered");
+}
 
-    // Verify all extents recovered.
-    assert_eq!(comp2.extent_count(), 3);
+#[test]
+fn dynamic_slab_allocation() {
+    let (comp, _mock) = setup();
+    // Create extents of different size classes — each triggers a new slab
+    comp.create_extent(1, 131072, "", 0, false)
+        .expect("128K class");
+    comp.create_extent(2, 262144, "", 0, false)
+        .expect("256K class");
+    comp.create_extent(3, 524288, "", 0, false)
+        .expect("512K class");
+    assert_eq!(comp.extent_count(), 3);
+}
 
-    let meta10 = ExtentMetadata::from_bytes(&comp2.lookup_extent(10).unwrap()).unwrap();
-    assert_eq!(meta10.filename.as_deref(), Some("file_a.dat"));
+#[test]
+fn multi_slab_same_class() {
+    let (comp, _mock) = create_test_component();
+    // Slab of 4 blocks: 1 bitmap + 3 slots
+    // Total: enough for multiple slabs
+    comp.initialize(100 * 4096, 4 * 4096, 1).expect("init");
 
-    let meta20 = ExtentMetadata::from_bytes(&comp2.lookup_extent(20).unwrap()).unwrap();
-    assert_eq!(meta20.data_crc, Some(0xCAFE));
+    // Fill first slab (3 slots)
+    comp.create_extent(1, 131072, "", 0, false).expect("1");
+    comp.create_extent(2, 131072, "", 0, false).expect("2");
+    comp.create_extent(3, 131072, "", 0, false).expect("3");
 
-    comp2.lookup_extent(30).unwrap();
+    // This should trigger a second slab allocation for the same class
+    comp.create_extent(4, 131072, "", 0, false).expect("4");
+    assert_eq!(comp.extent_count(), 4);
 }

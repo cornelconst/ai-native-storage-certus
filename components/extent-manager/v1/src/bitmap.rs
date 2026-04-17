@@ -1,154 +1,111 @@
-//! Allocation bitmap for tracking free/used extent slots per size class.
-
-use crate::block_device::BlockDevice;
 use crate::metadata::BLOCK_SIZE;
 
-/// Per-size-class allocation bitmap.
-///
-/// Tracks which extent slots are allocated (1) or free (0).
-/// The bitmap is stored as a `Vec<u8>` in memory and persisted
-/// to contiguous 4KiB blocks on the block device.
-///
-/// # Examples
-///
-/// ```
-/// use extent_manager::bitmap::AllocationBitmap;
-///
-/// let mut bm = AllocationBitmap::new(100);
-/// assert_eq!(bm.find_first_free(), Some(0));
-/// bm.set(0);
-/// assert_eq!(bm.find_first_free(), Some(1));
-/// bm.clear(0);
-/// assert_eq!(bm.find_first_free(), Some(0));
-/// ```
+const BITS_PER_WORD: usize = 64;
+const BITS_PER_BLOCK: usize = BLOCK_SIZE * 8;
+
+#[derive(Debug, Clone)]
 pub(crate) struct AllocationBitmap {
-    /// Raw bitmap bytes. Bit i of byte i/8 is (bytes[i/8] >> (i%8)) & 1.
-    bytes: Vec<u8>,
-    /// Total number of slots tracked.
+    words: Vec<u64>,
     num_slots: u32,
 }
 
 impl AllocationBitmap {
-    /// Create a new bitmap with `num_slots` slots, all initially free.
-    pub(crate) fn new(num_slots: u32) -> Self {
-        let num_bytes = (num_slots as usize).div_ceil(8);
-        // Round up to full blocks for persistence alignment.
-        let aligned_bytes = num_bytes.div_ceil(BLOCK_SIZE) * BLOCK_SIZE;
-        Self {
-            bytes: vec![0u8; aligned_bytes],
+    pub fn new(num_slots: u32) -> Self {
+        let num_words = (num_slots as usize).div_ceil(BITS_PER_WORD);
+        AllocationBitmap {
+            words: vec![0u64; num_words],
             num_slots,
         }
     }
 
-    /// Number of 4KiB blocks needed to store this bitmap on disk.
-    pub(crate) fn block_count(&self) -> u64 {
-        (self.bytes.len() / BLOCK_SIZE) as u64
-    }
-
-    /// Total number of slots tracked.
-    pub(crate) fn num_slots(&self) -> u32 {
-        self.num_slots
-    }
-
-    /// Check if a slot is allocated.
-    pub(crate) fn is_set(&self, slot: u32) -> bool {
-        if slot >= self.num_slots {
-            return false;
-        }
-        let byte_idx = slot as usize / 8;
-        let bit_idx = slot as usize % 8;
-        (self.bytes[byte_idx] >> bit_idx) & 1 == 1
-    }
-
-    /// Mark a slot as allocated.
-    pub(crate) fn set(&mut self, slot: u32) {
-        if slot < self.num_slots {
-            let byte_idx = slot as usize / 8;
-            let bit_idx = slot as usize % 8;
-            self.bytes[byte_idx] |= 1 << bit_idx;
+    pub fn set(&mut self, index: u32) {
+        let (word_idx, bit_idx) = Self::position(index);
+        if word_idx < self.words.len() {
+            self.words[word_idx] |= 1u64 << bit_idx;
         }
     }
 
-    /// Mark a slot as free.
-    pub(crate) fn clear(&mut self, slot: u32) {
-        if slot < self.num_slots {
-            let byte_idx = slot as usize / 8;
-            let bit_idx = slot as usize % 8;
-            self.bytes[byte_idx] &= !(1 << bit_idx);
+    pub fn clear(&mut self, index: u32) {
+        let (word_idx, bit_idx) = Self::position(index);
+        if word_idx < self.words.len() {
+            self.words[word_idx] &= !(1u64 << bit_idx);
         }
     }
 
-    /// Find the first free (0) slot. Returns `None` if all slots are allocated.
-    pub(crate) fn find_first_free(&self) -> Option<u32> {
-        for (byte_idx, &byte) in self.bytes.iter().enumerate() {
-            if byte != 0xFF {
-                for bit in 0..8u32 {
-                    let slot = byte_idx as u32 * 8 + bit;
-                    if slot >= self.num_slots {
-                        return None;
-                    }
-                    if (byte >> bit) & 1 == 0 {
-                        return Some(slot);
-                    }
+    pub fn is_set(&self, index: u32) -> bool {
+        let (word_idx, bit_idx) = Self::position(index);
+        if word_idx < self.words.len() {
+            self.words[word_idx] & (1u64 << bit_idx) != 0
+        } else {
+            false
+        }
+    }
+
+    pub fn find_free(&self) -> Option<u32> {
+        for (word_idx, &word) in self.words.iter().enumerate() {
+            if word != u64::MAX {
+                let bit_idx = (!word).trailing_zeros() as usize;
+                let slot = word_idx * BITS_PER_WORD + bit_idx;
+                if (slot as u32) < self.num_slots {
+                    return Some(slot as u32);
                 }
             }
         }
         None
     }
 
-    /// Count the number of allocated slots.
-    pub(crate) fn count_allocated(&self) -> u32 {
-        let mut count = 0u32;
-        for slot in 0..self.num_slots {
-            if self.is_set(slot) {
-                count += 1;
+    #[allow(dead_code)]
+    pub fn count_allocated(&self) -> u32 {
+        self.words.iter().map(|w| w.count_ones()).sum()
+    }
+
+    pub fn num_blocks(&self) -> u64 {
+        let total_bits = self.num_slots as u64;
+        total_bits.div_ceil(BITS_PER_BLOCK as u64)
+    }
+
+    pub fn serialize_to_blocks(&self) -> Vec<[u8; BLOCK_SIZE]> {
+        let n = self.num_blocks() as usize;
+        let mut blocks = vec![[0u8; BLOCK_SIZE]; n];
+        let word_bytes: Vec<u8> = self.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+
+        for (i, block) in blocks.iter_mut().enumerate() {
+            let start = i * BLOCK_SIZE;
+            let end = (start + BLOCK_SIZE).min(word_bytes.len());
+            if start < word_bytes.len() {
+                block[..end - start].copy_from_slice(&word_bytes[start..end]);
             }
         }
-        count
+        blocks
     }
 
-    /// Persist the bitmap to the block device starting at `start_lba`.
-    ///
-    /// Each 4KiB chunk of the bitmap is written as a separate atomic block.
-    pub(crate) fn persist(&self, bd: &BlockDevice, start_lba: u64) -> Result<(), String> {
-        let num_blocks = self.block_count();
-        for i in 0..num_blocks {
-            let offset = i as usize * BLOCK_SIZE;
-            let block: [u8; BLOCK_SIZE] =
-                self.bytes[offset..offset + BLOCK_SIZE].try_into().unwrap();
-            bd.write_block(start_lba + i, &block)?;
+    pub fn deserialize_from_blocks(blocks: &[[u8; BLOCK_SIZE]], num_slots: u32) -> Self {
+        let num_words = (num_slots as usize).div_ceil(BITS_PER_WORD);
+        let mut words = Vec::with_capacity(num_words);
+
+        let all_bytes: Vec<u8> = blocks.iter().flat_map(|b| b.iter().copied()).collect();
+
+        for i in 0..num_words {
+            let offset = i * 8;
+            if offset + 8 <= all_bytes.len() {
+                let word = u64::from_le_bytes(all_bytes[offset..offset + 8].try_into().unwrap());
+                words.push(word);
+            } else {
+                words.push(0);
+            }
         }
-        Ok(())
+
+        AllocationBitmap { words, num_slots }
     }
 
-    /// Persist only the block containing the given slot.
-    ///
-    /// This is used after a single set/clear operation to minimize I/O.
-    pub(crate) fn persist_block_for_slot(
-        &self,
-        bd: &BlockDevice,
-        start_lba: u64,
-        slot: u32,
-    ) -> Result<(), String> {
-        let byte_idx = slot as usize / 8;
-        let block_idx = byte_idx / BLOCK_SIZE;
-        let offset = block_idx * BLOCK_SIZE;
-        let block: [u8; BLOCK_SIZE] = self.bytes[offset..offset + BLOCK_SIZE].try_into().unwrap();
-        bd.write_block(start_lba + block_idx as u64, &block)
+    #[allow(dead_code)]
+    pub fn num_slots(&self) -> u32 {
+        self.num_slots
     }
 
-    /// Load the bitmap from the block device starting at `start_lba`.
-    pub(crate) fn load(bd: &BlockDevice, start_lba: u64, num_slots: u32) -> Result<Self, String> {
-        let mut bm = Self::new(num_slots);
-        let num_blocks = bm.block_count();
-        for i in 0..num_blocks {
-            let offset = i as usize * BLOCK_SIZE;
-            let block: &mut [u8; BLOCK_SIZE] = (&mut bm.bytes[offset..offset + BLOCK_SIZE])
-                .try_into()
-                .unwrap();
-            bd.read_block(start_lba + i, block)?;
-        }
-        Ok(bm)
+    fn position(index: u32) -> (usize, usize) {
+        let idx = index as usize;
+        (idx / BITS_PER_WORD, idx % BITS_PER_WORD)
     }
 }
 
@@ -160,100 +117,76 @@ mod tests {
     fn new_bitmap_all_free() {
         let bm = AllocationBitmap::new(100);
         for i in 0..100 {
-            assert!(!bm.is_set(i), "slot {i} should be free");
+            assert!(!bm.is_set(i));
         }
-    }
-
-    #[test]
-    fn set_and_check() {
-        let mut bm = AllocationBitmap::new(64);
-        bm.set(0);
-        bm.set(7);
-        bm.set(63);
-        assert!(bm.is_set(0));
-        assert!(bm.is_set(7));
-        assert!(bm.is_set(63));
-        assert!(!bm.is_set(1));
-    }
-
-    #[test]
-    fn clear_after_set() {
-        let mut bm = AllocationBitmap::new(32);
-        bm.set(5);
-        assert!(bm.is_set(5));
-        bm.clear(5);
-        assert!(!bm.is_set(5));
-    }
-
-    #[test]
-    fn find_first_free_empty() {
-        let bm = AllocationBitmap::new(10);
-        assert_eq!(bm.find_first_free(), Some(0));
-    }
-
-    #[test]
-    fn find_first_free_partial() {
-        let mut bm = AllocationBitmap::new(10);
-        bm.set(0);
-        bm.set(1);
-        bm.set(2);
-        assert_eq!(bm.find_first_free(), Some(3));
-    }
-
-    #[test]
-    fn find_first_free_full() {
-        let mut bm = AllocationBitmap::new(8);
-        for i in 0..8 {
-            bm.set(i);
-        }
-        assert_eq!(bm.find_first_free(), None);
-    }
-
-    #[test]
-    fn count_allocated() {
-        let mut bm = AllocationBitmap::new(100);
         assert_eq!(bm.count_allocated(), 0);
-        bm.set(10);
-        bm.set(20);
-        bm.set(30);
+    }
+
+    #[test]
+    fn set_and_clear() {
+        let mut bm = AllocationBitmap::new(128);
+        bm.set(0);
+        bm.set(63);
+        bm.set(64);
+        bm.set(127);
+        assert!(bm.is_set(0));
+        assert!(bm.is_set(63));
+        assert!(bm.is_set(64));
+        assert!(bm.is_set(127));
+        assert!(!bm.is_set(1));
+        assert_eq!(bm.count_allocated(), 4);
+
+        bm.clear(63);
+        assert!(!bm.is_set(63));
         assert_eq!(bm.count_allocated(), 3);
     }
 
     #[test]
-    fn block_count_small() {
-        let bm = AllocationBitmap::new(100);
-        assert_eq!(bm.block_count(), 1); // 100 bits < 32768 bits per block
-    }
+    fn find_free_basic() {
+        let mut bm = AllocationBitmap::new(64);
+        assert_eq!(bm.find_free(), Some(0));
+        bm.set(0);
+        assert_eq!(bm.find_free(), Some(1));
 
-    #[test]
-    fn block_count_large() {
-        let bm = AllocationBitmap::new(100_000);
-        // 100K bits / 32768 bits per block = 4 blocks (ceil)
-        assert_eq!(bm.block_count(), 4);
-    }
-
-    #[test]
-    fn is_set_out_of_range() {
-        let bm = AllocationBitmap::new(10);
-        assert!(!bm.is_set(10));
-        assert!(!bm.is_set(100));
-    }
-
-    #[test]
-    fn set_out_of_range_is_noop() {
-        let mut bm = AllocationBitmap::new(10);
-        bm.set(10); // should not panic
-        assert!(!bm.is_set(10));
-    }
-
-    #[test]
-    fn find_first_free_skips_padding_bits() {
-        // 10 slots, but bitmap bytes cover 16 bits (2 bytes).
-        // Slots 0-9 used. find_first_free should return None, not 10.
-        let mut bm = AllocationBitmap::new(10);
-        for i in 0..10 {
+        for i in 0..63 {
             bm.set(i);
         }
-        assert_eq!(bm.find_first_free(), None);
+        assert_eq!(bm.find_free(), Some(63));
+        bm.set(63);
+        assert_eq!(bm.find_free(), None);
+    }
+
+    #[test]
+    fn find_free_crosses_word_boundary() {
+        let mut bm = AllocationBitmap::new(128);
+        for i in 0..64 {
+            bm.set(i);
+        }
+        assert_eq!(bm.find_free(), Some(64));
+    }
+
+    #[test]
+    fn serialize_deserialize_roundtrip() {
+        let mut bm = AllocationBitmap::new(200);
+        bm.set(0);
+        bm.set(99);
+        bm.set(199);
+
+        let blocks = bm.serialize_to_blocks();
+        let restored = AllocationBitmap::deserialize_from_blocks(&blocks, 200);
+
+        assert!(restored.is_set(0));
+        assert!(restored.is_set(99));
+        assert!(restored.is_set(199));
+        assert!(!restored.is_set(1));
+        assert_eq!(restored.count_allocated(), 3);
+    }
+
+    #[test]
+    fn num_blocks_calculation() {
+        assert_eq!(AllocationBitmap::new(1).num_blocks(), 1);
+        assert_eq!(AllocationBitmap::new(32768).num_blocks(), 1);
+        assert_eq!(AllocationBitmap::new(32769).num_blocks(), 2);
+        assert_eq!(AllocationBitmap::new(10_000_000).num_blocks(), 306);
     }
 }

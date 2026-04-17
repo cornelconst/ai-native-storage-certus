@@ -1,86 +1,33 @@
-//! Extent Manager component for the Certus storage system.
-//!
-//! Manages fixed-size storage extents on NVMe SSDs with crash-consistent
-//! metadata persistence. Uses bitmap-based space allocation with 4KiB-atomic
-//! writes exploiting NVMe power-fail guarantees.
-//!
-//! # Architecture
-//!
-//! - `IExtentManager` interface: create, remove, lookup, iterate extents
-//! - **Bitmap allocation**: one bit per slot per size class
-//! - **On-disk format**: superblock + bitmap region + extent record region
-//! - **Crash recovery**: orphan detection and cleanup on startup
-//!
-//! # Requirements
-//!
-//! This crate requires the `spdk` feature (enabled by default) and an
-//! `IBlockDevice` provider (e.g., `block-device-spdk-nvme`).
-//!
-//! # Component lifecycle
-//!
-//! 1. Create: `ExtentManagerComponentV1::new_default()`
-//! 2. Wire receptacles: connect `IBlockDevice` to `block_device`, `ILogger` to `logger`
-//! 3. Initialize: `comp.initialize(sizes, slots, ns_id)` or `comp.open(ns_id)`
-//! 4. Use via `IExtentManager` interface
-
-pub mod bitmap;
-pub mod block_device;
-pub mod error;
-pub mod metadata;
-pub mod recovery;
-pub mod superblock;
+mod bitmap;
+mod block_device;
+mod error;
+mod metadata;
+mod recovery;
+mod state;
+mod superblock;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
-use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 
-use component_framework::define_component;
-use interfaces::{IBlockDevice, IExtentManager, ILogger};
+use interfaces::{
+    DmaAllocFn, ExtentManagerError, IBlockDevice, IExtentManager, IExtentManagerAdmin, ILogger,
+    NvmeBlockError, RecoveryResult,
+};
 
-use crate::block_device::DmaAllocFn;
+use component_macros::define_component;
 
 use crate::bitmap::AllocationBitmap;
-use crate::block_device::BlockDevice;
-use crate::metadata::OnDiskExtentRecord;
+use crate::block_device::BlockDeviceClient;
+use crate::metadata::{ExtentMetadata, OnDiskExtentRecord, BLOCK_SIZE};
+use crate::state::ExtentManagerState;
 use crate::superblock::{Superblock, SUPERBLOCK_LBA};
 
-pub use crate::error::ExtentManagerError;
-pub use crate::metadata::ExtentMetadata;
-pub use crate::recovery::RecoveryResult;
-
-/// Runtime configuration for the extent manager.
-#[derive(Debug, Clone)]
-pub struct ExtentManagerConfig {
-    /// Configured extent sizes in bytes, indexed by size class.
-    pub sizes: Vec<u32>,
-    /// Maximum slots per size class.
-    pub slots: Vec<u32>,
-    /// NVMe namespace ID.
-    pub ns_id: u32,
-}
-
-/// Internal state created during initialization.
-///
-/// Stored inside the component behind `RwLock<Option<...>>` so that
-/// the outer lock is always read-locked during operations (concurrent
-/// access) while the inner `RwLock`/`Mutex` provide fine-grained locking.
-struct ExtentManagerState {
-    bd: BlockDevice,
-    superblock: Superblock,
-    config: ExtentManagerConfig,
-    index: RwLock<HashMap<u64, ExtentMetadata>>,
-    bitmaps: Vec<Mutex<AllocationBitmap>>,
-}
-
-// Extent Manager component.
-//
-// Provides IExtentManager and requires IBlockDevice via receptacle.
 define_component! {
     pub ExtentManagerComponentV1 {
         version: "0.1.0",
-        provides: [IExtentManager],
+        provides: [IExtentManager, IExtentManagerAdmin],
         receptacles: {
             block_device: IBlockDevice,
             logger: ILogger,
@@ -93,283 +40,159 @@ define_component! {
 }
 
 impl ExtentManagerComponentV1 {
-    /// Emit a debug-level log message.
-    ///
-    /// If the `logger` receptacle is connected, acknowledges connectivity;
-    /// always writes to stderr with `[extent-manager]` prefix.
-    fn log_debug(&self, msg: &str) {
-        if let Ok(logger) = self.logger.get() {
-            let _ = logger.name();
-        }
-        eprintln!("[extent-manager] {msg}");
+    #[allow(dead_code)]
+    pub(crate) fn new_inner() -> std::sync::Arc<Self> {
+        ExtentManagerComponentV1::new_default()
     }
 
-    /// Set a custom DMA allocator (used in tests to avoid SPDK dependency).
-    ///
-    /// If not set, the default SPDK hugepage allocator is used.
-    pub(crate) fn set_dma_alloc(&self, alloc: DmaAllocFn) {
-        *self.dma_alloc.lock().expect("dma_alloc lock poisoned") = Some(alloc);
-    }
-
-    /// Helper to connect to the IBlockDevice from the receptacle.
-    fn connect_block_device(&self, ns_id: u32) -> Result<BlockDevice, ExtentManagerError> {
-        let ibd = self.block_device.get().map_err(|_| {
-            ExtentManagerError::NotInitialized(
-                "block_device receptacle not connected — wire IBlockDevice before initializing"
-                    .into(),
-            )
-        })?;
-
-        let dma_alloc = self
+    fn get_client(&self) -> Result<BlockDeviceClient, NvmeBlockError> {
+        let bd = self
+            .block_device
+            .get()
+            .map_err(|_| NvmeBlockError::NotInitialized("block device not connected".into()))?;
+        let channels = bd.connect_client()?;
+        let alloc = self
             .dma_alloc
             .lock()
-            .expect("dma_alloc lock poisoned")
-            .clone();
-
-        let bd = if let Some(alloc) = dma_alloc {
-            BlockDevice::new_with_alloc(&ibd, ns_id, alloc)
-        } else {
-            BlockDevice::new(&ibd, ns_id)
-        }
-        .map_err(|e| ExtentManagerError::IoError(format!("block device connect failed: {e}")))?;
-
-        self.log_debug(&format!(
-            "block device connected: {} blocks, ns_id={}",
-            bd.block_count(),
-            ns_id
-        ));
-        Ok(bd)
+            .unwrap()
+            .clone()
+            .ok_or_else(|| NvmeBlockError::NotInitialized("DMA allocator not set".into()))?;
+        Ok(BlockDeviceClient::new(channels, alloc))
     }
 
-    /// Initialize a new extent manager on a fresh block device.
-    ///
-    /// Writes the superblock and empty bitmaps. The device must have
-    /// enough blocks to hold the metadata regions.
-    ///
-    /// Must be called after wiring the `block_device` receptacle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if receptacles are not wired, the device is too small,
-    /// or I/O fails.
-    pub(crate) fn initialize(
+    fn allocate_slab(
         &self,
-        sizes: &[u32],
-        slots: &[u32],
-        ns_id: u32,
-    ) -> Result<(), ExtentManagerError> {
-        self.log_debug(&format!(
-            "initializing: {} size classes, ns_id={}",
-            sizes.len(),
-            ns_id
-        ));
-
-        let bd = self.connect_block_device(ns_id)?;
-        let sb = Superblock::new(sizes, slots)?;
-
-        self.log_debug(&format!(
-            "device: {} blocks available, {} required",
-            bd.block_count(),
-            sb.total_blocks_required()
-        ));
-
-        if bd.block_count() < sb.total_blocks_required() {
-            return Err(ExtentManagerError::IoError(format!(
-                "device too small: need {} blocks, have {}",
-                sb.total_blocks_required(),
-                bd.block_count()
-            )));
+        state: &mut ExtentManagerState,
+        client: &BlockDeviceClient,
+        size_class: u32,
+    ) -> Result<usize, ExtentManagerError> {
+        if !state.can_allocate_slab() {
+            return Err(error::out_of_space(size_class));
         }
 
-        // Write superblock.
-        let sb_block = sb.serialize();
-        bd.write_block(SUPERBLOCK_LBA, &sb_block)
-            .map_err(ExtentManagerError::IoError)?;
+        let start_lba = state.next_free_lba;
+        let slab_size = state.slab_size_blocks;
+        let ns_id = state.namespace_id;
 
-        // Initialize and persist empty bitmaps.
-        let mut bitmaps = Vec::with_capacity(sizes.len());
-        for class in 0..sb.num_size_classes() {
-            let bm = AllocationBitmap::new(sb.slots_for_class(class).unwrap());
-            let lba = sb.bitmap_lba_for_class(class).unwrap();
-            bm.persist(&bd, lba).map_err(ExtentManagerError::IoError)?;
-            bitmaps.push(Mutex::new(bm));
+        let zero = metadata::zero_block();
+        for offset in 0..slab_size as u64 {
+            client
+                .write_block(ns_id, start_lba + offset, &zero)
+                .map_err(error::nvme_to_em)?;
         }
 
-        let inner = ExtentManagerState {
-            bd,
-            superblock: sb,
-            config: ExtentManagerConfig {
-                sizes: sizes.to_vec(),
-                slots: slots.to_vec(),
-                ns_id,
-            },
-            index: RwLock::new(HashMap::new()),
-            bitmaps,
-        };
+        let slab_idx = state.add_slab_descriptor(size_class, start_lba);
 
-        *self.state.write().expect("state lock poisoned") = Some(inner);
-        self.log_debug("initialized successfully");
-        Ok(())
-    }
-
-    /// Open an existing extent manager from a block device, performing
-    /// crash recovery.
-    ///
-    /// Reads the superblock, loads bitmaps, scans records, and cleans
-    /// orphans.
-    ///
-    /// Must be called after wiring the `block_device` receptacle.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the superblock is invalid, receptacles are not
-    /// wired, or I/O fails.
-    pub(crate) fn open(&self, ns_id: u32) -> Result<RecoveryResult, ExtentManagerError> {
-        self.log_debug(&format!("opening existing store, ns_id={ns_id}"));
-
-        let bd = self.connect_block_device(ns_id)?;
-
-        let mut sb_block = [0u8; 4096];
-        bd.read_block(SUPERBLOCK_LBA, &mut sb_block)
-            .map_err(ExtentManagerError::IoError)?;
-        let sb = Superblock::deserialize(&sb_block)?;
-
-        let (index, bm_list, stats) = recovery::recover(&bd, &sb)?;
-
-        self.log_debug(&format!(
-            "recovery complete: {} extents loaded, {} orphans cleaned",
-            stats.extents_loaded, stats.orphans_cleaned
-        ));
-
-        let sizes: Vec<u32> = (0..sb.num_size_classes())
-            .map(|c| sb.size_for_class(c).unwrap())
-            .collect();
-        let slots: Vec<u32> = (0..sb.num_size_classes())
-            .map(|c| sb.slots_for_class(c).unwrap())
-            .collect();
-
-        let bitmaps: Vec<Mutex<AllocationBitmap>> = bm_list.into_iter().map(Mutex::new).collect();
-
-        let inner = ExtentManagerState {
-            bd,
-            superblock: sb,
-            config: ExtentManagerConfig {
-                sizes,
-                slots,
-                ns_id,
-            },
-            index: RwLock::new(index),
-            bitmaps,
-        };
-
-        *self.state.write().expect("state lock poisoned") = Some(inner);
-        Ok(stats)
-    }
-
-    /// Get a read lock on the initialized state.
-    fn get_state(
-        &self,
-    ) -> Result<std::sync::RwLockReadGuard<'_, Option<ExtentManagerState>>, ExtentManagerError>
-    {
-        let guard = self.state.read().expect("state lock poisoned");
-        if guard.is_none() {
-            return Err(ExtentManagerError::NotInitialized(
-                "call initialize() or open() before using the extent manager".into(),
-            ));
+        let bitmap_blocks = state.slabs[slab_idx].bitmap.serialize_to_blocks();
+        for (i, block) in bitmap_blocks.iter().enumerate() {
+            client
+                .write_block(
+                    ns_id,
+                    state.slabs[slab_idx].bitmap_start_lba + i as u64,
+                    block,
+                )
+                .map_err(error::nvme_to_em)?;
         }
-        Ok(guard)
+
+        let mut sb = Superblock::new(state.total_blocks, state.slab_size_blocks, ns_id);
+        for s in &state.slabs {
+            sb.add_slab(s.size_class, s.start_lba);
+        }
+        client
+            .write_block(ns_id, SUPERBLOCK_LBA, &sb.serialize())
+            .map_err(error::nvme_to_em)?;
+
+        Ok(slab_idx)
     }
 }
 
-impl ExtentManagerState {
-    fn create_extent(
-        &self,
-        key: u64,
-        size_class: u32,
-        filename: Option<&str>,
-        data_crc: Option<u32>,
-    ) -> Result<ExtentMetadata, ExtentManagerError> {
-        if size_class >= self.superblock.num_size_classes() {
-            return Err(ExtentManagerError::InvalidSizeClass(size_class));
-        }
-
-        // Check for duplicate key (write lock because we'll insert).
-        let mut index = self.index.write().unwrap();
-        if index.contains_key(&key) {
-            return Err(ExtentManagerError::DuplicateKey(key));
-        }
-
-        // Allocate a slot from the bitmap.
-        let mut bm = self.bitmaps[size_class as usize].lock().unwrap();
-        let slot = bm
-            .find_first_free()
-            .ok_or(ExtentManagerError::OutOfSpace { size_class })?;
-
-        let extent_size = self.superblock.size_for_class(size_class).unwrap();
-        let global = self.superblock.global_slot(size_class, slot);
-        let offset_blocks = global;
-
-        let meta = ExtentMetadata {
-            key,
-            size_class,
-            extent_size,
-            ns_id: self.config.ns_id,
-            offset_blocks,
-            filename: filename.map(|s| s.to_string()),
-            data_crc,
-        };
-
-        // Step 1: Write the extent record block atomically.
-        let record = OnDiskExtentRecord::serialize(&meta)?;
-        let record_lba = self.superblock.record_lba(global);
-        self.bd
-            .write_block(record_lba, record.as_bytes())
-            .map_err(ExtentManagerError::IoError)?;
-
-        // Step 2: Flip the bitmap bit and persist the bitmap block atomically.
-        bm.set(slot);
-        let bm_lba = self.superblock.bitmap_lba_for_class(size_class).unwrap();
-        bm.persist_block_for_slot(&self.bd, bm_lba, slot)
-            .map_err(ExtentManagerError::IoError)?;
-
-        // Step 3: Update the in-memory index.
-        index.insert(key, meta.clone());
-
-        Ok(meta)
+impl IExtentManagerAdmin for ExtentManagerComponentV1 {
+    fn set_dma_alloc(&self, alloc: DmaAllocFn) {
+        *self.dma_alloc.lock().unwrap() = Some(alloc);
     }
 
-    fn remove_extent(&self, key: u64) -> Result<(), ExtentManagerError> {
-        let mut index = self.index.write().unwrap();
-        let meta = index
-            .get(&key)
-            .ok_or(ExtentManagerError::KeyNotFound(key))?
-            .clone();
+    fn initialize(
+        &self,
+        total_size_bytes: u64,
+        slab_size_bytes: u32,
+        ns_id: u32,
+    ) -> Result<(), NvmeBlockError> {
+        if total_size_bytes == 0 {
+            return Err(NvmeBlockError::BlockDevice(
+                interfaces::BlockDeviceError::WriteFailed("total_size_bytes must be > 0".into()),
+            ));
+        }
+        if slab_size_bytes < (BLOCK_SIZE as u32 * 2) {
+            return Err(NvmeBlockError::BlockDevice(
+                interfaces::BlockDeviceError::WriteFailed(format!(
+                    "slab_size_bytes must be >= {} (2 blocks)",
+                    BLOCK_SIZE * 2,
+                )),
+            ));
+        }
+        if slab_size_bytes as u64 % BLOCK_SIZE as u64 != 0 {
+            return Err(NvmeBlockError::BlockDevice(
+                interfaces::BlockDeviceError::WriteFailed(
+                    "slab_size_bytes must be a multiple of block size (4096)".into(),
+                ),
+            ));
+        }
 
-        let class = meta.size_class;
-        let global = self.superblock.global_slot(class, 0);
-        let slot = (meta.offset_blocks - global) as u32;
+        let total_blocks = total_size_bytes / BLOCK_SIZE as u64;
+        let slab_size_blocks = slab_size_bytes / BLOCK_SIZE as u32;
 
-        let mut bm = self.bitmaps[class as usize].lock().unwrap();
-        bm.clear(slot);
-        let bm_lba = self.superblock.bitmap_lba_for_class(class).unwrap();
-        bm.persist_block_for_slot(&self.bd, bm_lba, slot)
-            .map_err(ExtentManagerError::IoError)?;
+        let client = self.get_client()?;
+        let sb = Superblock::new(total_blocks, slab_size_blocks, ns_id);
+        client.write_block(ns_id, SUPERBLOCK_LBA, &sb.serialize())?;
 
-        index.remove(&key);
+        let em_state = ExtentManagerState::new(total_blocks, slab_size_blocks, ns_id);
+        *self.state.write().unwrap() = Some(em_state);
         Ok(())
     }
 
-    fn lookup_extent(&self, key: u64) -> Result<ExtentMetadata, ExtentManagerError> {
-        let index = self.index.read().unwrap();
-        index
-            .get(&key)
-            .cloned()
-            .ok_or(ExtentManagerError::KeyNotFound(key))
-    }
+    fn open(&self, ns_id: u32) -> Result<RecoveryResult, NvmeBlockError> {
+        let client = self.get_client()?;
 
-    fn extent_count(&self) -> u64 {
-        let index = self.index.read().unwrap();
-        index.len() as u64
+        let sb_data = client.read_block(ns_id, SUPERBLOCK_LBA)?;
+        let sb = Superblock::deserialize(&sb_data).map_err(|e| {
+            NvmeBlockError::BlockDevice(interfaces::BlockDeviceError::ReadFailed(e))
+        })?;
+
+        let mut em_state = ExtentManagerState::new(sb.total_blocks, sb.slab_size_blocks, ns_id);
+        em_state.next_free_lba = sb.next_free_lba;
+
+        for entry in &sb.slab_table {
+            em_state.add_slab_descriptor(entry.size_class, entry.start_lba);
+        }
+
+        for slab in &mut em_state.slabs {
+            let num_bitmap_blocks = slab.bitmap_blocks as usize;
+            let mut bitmap_blocks = Vec::with_capacity(num_bitmap_blocks);
+            for j in 0..num_bitmap_blocks {
+                let block = client.read_block(ns_id, slab.bitmap_start_lba + j as u64)?;
+                bitmap_blocks.push(block);
+            }
+            slab.bitmap = AllocationBitmap::deserialize_from_blocks(&bitmap_blocks, slab.num_slots);
+        }
+
+        let result = recovery::recover(&client, &mut em_state.slabs, ns_id)?;
+
+        for slab in &em_state.slabs {
+            for slot in 0..slab.num_slots {
+                if slab.bitmap.is_set(slot) {
+                    let lba = slab.record_start_lba + slot as u64;
+                    let block_data = client.read_block(ns_id, lba)?;
+                    let record = OnDiskExtentRecord { data: block_data };
+                    if let Some(mut meta) = record.to_metadata() {
+                        meta.slab_index = slab.slab_index;
+                        em_state.index.insert(meta.key, meta);
+                    }
+                }
+            }
+        }
+
+        *self.state.write().unwrap() = Some(em_state);
+        Ok(result)
     }
 }
 
@@ -382,70 +205,139 @@ impl IExtentManager for ExtentManagerComponentV1 {
         data_crc: u32,
         has_crc: bool,
     ) -> Result<Vec<u8>, ExtentManagerError> {
-        let guard = self.get_state()?;
-        let state = guard.as_ref().unwrap();
+        if !(131072..=5_242_880).contains(&size_class) || size_class % 4096 != 0 {
+            return Err(error::invalid_size_class(size_class));
+        }
+
+        let mut state_guard = self.state.write().unwrap();
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| error::not_initialized("component not initialized"))?;
+
+        if state.index.contains_key(&key) {
+            return Err(error::duplicate_key(key));
+        }
+
+        let (slab_idx, slot) = match state.find_free_slot(size_class) {
+            Some(result) => result,
+            None => {
+                let client = self.get_client().map_err(error::nvme_to_em)?;
+                let new_slab_idx = self.allocate_slab(state, &client, size_class)?;
+                let slot = state.slabs[new_slab_idx]
+                    .bitmap
+                    .find_free()
+                    .ok_or_else(|| error::out_of_space(size_class))?;
+                (new_slab_idx, slot)
+            }
+        };
+
+        let slab = &state.slabs[slab_idx];
+        let offset_lba = slab.record_start_lba + slot as u64;
 
         let fname = if filename.is_empty() {
             None
         } else {
-            Some(filename)
+            Some(filename.to_string())
         };
         let crc = if has_crc { Some(data_crc) } else { None };
 
-        let meta = state.create_extent(key, size_class, fname, crc)?;
-        self.log_debug(&format!(
-            "created extent key={key} class={size_class} offset={}",
-            meta.offset_blocks
-        ));
-        Ok(meta.to_bytes())
+        let meta = ExtentMetadata {
+            key,
+            size_class,
+            namespace_id: state.namespace_id,
+            offset_lba,
+            filename: fname,
+            data_crc: crc,
+            slab_index: slab_idx,
+        };
+
+        let client = self.get_client().map_err(error::nvme_to_em)?;
+
+        let record = OnDiskExtentRecord::from_metadata(&meta);
+        client
+            .write_block(state.namespace_id, offset_lba, &record.data)
+            .map_err(error::nvme_to_em)?;
+
+        state.slabs[slab_idx].bitmap.set(slot);
+        let bitmap_blocks = state.slabs[slab_idx].bitmap.serialize_to_blocks();
+        let bitmap_block_idx = (slot as usize) / (BLOCK_SIZE * 8);
+        if bitmap_block_idx < bitmap_blocks.len() {
+            let bitmap_lba = state.slabs[slab_idx].bitmap_start_lba + bitmap_block_idx as u64;
+            client
+                .write_block(
+                    state.namespace_id,
+                    bitmap_lba,
+                    &bitmap_blocks[bitmap_block_idx],
+                )
+                .map_err(error::nvme_to_em)?;
+        }
+
+        let serialized = meta.serialize();
+        state.index.insert(key, meta);
+
+        Ok(serialized)
     }
 
     fn remove_extent(&self, key: u64) -> Result<(), ExtentManagerError> {
-        let guard = self.get_state()?;
-        let state = guard.as_ref().unwrap();
-        state.remove_extent(key)?;
-        self.log_debug(&format!("removed extent key={key}"));
+        let mut state_guard = self.state.write().unwrap();
+        let state = state_guard
+            .as_mut()
+            .ok_or_else(|| error::not_initialized("component not initialized"))?;
+
+        let meta = state
+            .index
+            .get(&key)
+            .ok_or_else(|| error::key_not_found(key))?
+            .clone();
+
+        let slab_idx = meta.slab_index;
+        let slab = &state.slabs[slab_idx];
+        let slot = (meta.offset_lba - slab.record_start_lba) as u32;
+
+        let client = self.get_client().map_err(error::nvme_to_em)?;
+
+        state.slabs[slab_idx].bitmap.clear(slot);
+        let bitmap_blocks = state.slabs[slab_idx].bitmap.serialize_to_blocks();
+        let bitmap_block_idx = (slot as usize) / (BLOCK_SIZE * 8);
+        if bitmap_block_idx < bitmap_blocks.len() {
+            let bitmap_lba = state.slabs[slab_idx].bitmap_start_lba + bitmap_block_idx as u64;
+            client
+                .write_block(
+                    state.namespace_id,
+                    bitmap_lba,
+                    &bitmap_blocks[bitmap_block_idx],
+                )
+                .map_err(error::nvme_to_em)?;
+        }
+
+        let zero = metadata::zero_block();
+        client
+            .write_block(state.namespace_id, meta.offset_lba, &zero)
+            .map_err(error::nvme_to_em)?;
+
+        state.index.remove(&key);
         Ok(())
     }
 
     fn lookup_extent(&self, key: u64) -> Result<Vec<u8>, ExtentManagerError> {
-        let guard = self.get_state()?;
-        let state = guard.as_ref().unwrap();
-        let meta = state.lookup_extent(key)?;
-        Ok(meta.to_bytes())
+        let state_guard = self.state.read().unwrap();
+        let state = state_guard
+            .as_ref()
+            .ok_or_else(|| error::not_initialized("component not initialized"))?;
+
+        let meta = state
+            .index
+            .get(&key)
+            .ok_or_else(|| error::key_not_found(key))?;
+
+        Ok(meta.serialize())
     }
 
     fn extent_count(&self) -> u64 {
-        let guard = self.state.read().expect("state lock poisoned");
-        match guard.as_ref() {
-            Some(state) => state.extent_count(),
+        let state_guard = self.state.read().unwrap();
+        match state_guard.as_ref() {
+            Some(state) => state.total_extents(),
             None => 0,
         }
-    }
-}
-
-impl interfaces::IExtentManagerAdmin for ExtentManagerComponentV1 {
-    fn set_dma_alloc(&self, alloc: interfaces::spdk_types::DmaAllocFn) {
-        self.set_dma_alloc(alloc);
-    }
-
-    fn initialize(
-        &self,
-        sizes: Vec<u32>,
-        slots: Vec<u32>,
-        ns_id: u32,
-    ) -> Result<(), interfaces::NvmeBlockError> {
-        self.initialize(&sizes, &slots, ns_id)
-            .map_err(|e| interfaces::NvmeBlockError::NotSupported(e.to_string()))
-    }
-
-    fn open(&self, ns_id: u32) -> Result<interfaces::RecoveryResult, interfaces::NvmeBlockError> {
-        let stats = self
-            .open(ns_id)
-            .map_err(|e| interfaces::NvmeBlockError::NotSupported(e.to_string()))?;
-        Ok(interfaces::RecoveryResult {
-            extents_loaded: stats.extents_loaded,
-            orphans_cleaned: stats.orphans_cleaned,
-        })
     }
 }

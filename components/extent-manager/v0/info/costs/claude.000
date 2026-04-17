@@ -1,0 +1,40 @@
+/cost                                                                                                                                                           
+  ?  Total cost:            $37.26                                                                                                                                
+     Total duration (API):  1h 19m 29s                                                                                                                            
+     Total duration (wall): 3h 45m 22s                                                                                                                            
+     Total code changes:    5120 lines added, 1135 lines removed                                                                                                  
+     Usage by model:                                                                                                                          
+          claude-opus-4-6:  426.1k input, 175.2k output, 36.1m cache read, 1.5m cache write ($33.95)                                    
+        claude-sonnet-4-6:  25.4k input, 37.9k output, 3.9m cache read, 396.0k cache write ($3.31)                                                            
+                
+/context                                                                                                                                                        
+  ?  Context Usage                                                                                                                                                
+     ? ? ? ? ? ? ? ? ? ?   Opus 4.6                                                                                                                               
+                           aws/claude-opus-4-6                                                                                                                    
+     ? ? ? ? ? ? ? ? ? ?   107.4k/200k tokens (54%)                                                                                                               
+                                                                                                                                                              
+     ? ? ? ? ? ? ? ? ? ?   Estimated usage by category                                                                                                            
+                           ? System prompt: 6.7k tokens (3.3%)                                                                                                  
+     ? ? ? ? ? ? ? ? ? ?   ? Memory files: 1.2k tokens (0.6%)                                                                                                     
+                           ? Skills: 657 tokens (0.3%)
+     ? ? ? ? ? ? ? ? ? ?   ? Messages: 98.9k tokens (49.4%)
+                           ? Free space: 59.6k (29.8%)
+     ? ? ? ? ? ? ? ? ? ?   ? Autocompact buffer: 33k tokens (16.5%)
+
+     ? ? ? ? ? ? ? ? ? ?
+
+     ? ? ? ? ? ? ? ? ? ?
+
+     ? ? ? ? ? ? ? ? ? ?
+
+     ? ? ? ? ? ? ? ? ? ?
+
+     Memory files · /memory
+     ? components/extent-manager/v1/CLAUDE.md: 1.2k tokens
+
+     Skills · /skills
+
+      Suggestions
+      ? File reads using 14.4k tokens (7%) ? save ~4.3k
+        If you are re-reading files, consider referencing earlier reads. Use offset/limit for large files.
+

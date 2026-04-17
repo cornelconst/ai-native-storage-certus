@@ -1,0 +1,35 @@
+/cost                                                                                                                                         
+  ⎿  Total cost:            $37.74
+     Total duration (API):  1h 19m 31s                                                                                                          
+     Total duration (wall): 3h 4m 59s                                                                                         
+     Total code changes:    5869 lines added, 612 lines removed                                                                             
+     Usage by model:                                                                                                                        
+          claude-opus-4-6:  418.9k input, 203.9k output, 38.4m cache read, 1.4m cache write ($34.93)                                     
+        claude-sonnet-4-6:  9.9k input, 45.6k output, 2.8m cache read, 331.1k cache write ($2.81)                                           
+                                                                                                                                          
+❯ /context                                                                                                                                      
+  ⎿  Context Usage
+     ⛁ ⛁ ⛁ ⛁ ⛀ ⛁ ⛁ ⛁ ⛁ ⛁   Opus 4.6                                                                                                             
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   aws/claude-opus-4-6                                                                                
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   162.8k/200k tokens (81%)                                                                                             
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁                                                                                                                    
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   Estimated usage by category                                                                                          
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   ⛁ System prompt: 6.6k tokens (3.3%)                                                                              
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   ⛁ Memory files: 1.7k tokens (0.9%)                                                                                   
+     ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁ ⛁   ⛁ Skills: 689 tokens (0.3%)
+     ⛁ ⛁ ⛶ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛁ Messages: 153.8k tokens (76.9%)
+     ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝ ⛝   ⛶ Free space: 4.2k (2.1%)
+                           ⛝ Autocompact buffer: 33k tokens (16.5%)
+
+     Memory files · /memory
+     └ components/extent-manager/v1/CLAUDE.md: 1.7k tokens
+
+     Skills · /skills
+
+      Suggestions
+      ⚠ Context is 81% full
+        Autocompact will trigger soon, which discards older messages. Use /compact now to control what gets kept.
+
+      ℹ File reads using 28.6k tokens (14%) → save ~8.6k
+        If you are re-reading files, consider referencing earlier reads. Use offset/limit for large files.
+

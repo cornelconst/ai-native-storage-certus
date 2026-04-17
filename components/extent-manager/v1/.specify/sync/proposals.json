@@ -1,0 +1,121 @@
+{
+  "generated": "2026-04-16T00:00:00Z",
+  "based_on": "drift-report from 2026-04-16",
+  "summary": {
+    "backfill": 4,
+    "align": 1,
+    "human_decision": 2,
+    "new_specs": 0,
+    "remove_from_spec": 0
+  },
+  "proposals": [
+    {
+      "id": 1,
+      "spec": "001-extent-management",
+      "requirement": "FR-007",
+      "direction": "BACKFILL",
+      "severity": "major",
+      "confidence": "HIGH",
+      "summary": "Replace static size-class model with dynamic slab-based allocation in spec",
+      "spec_text": "1 to 32 fixed extent size classes, configurable at initialization, up to 10M slots per class",
+      "proposed_text": "System MUST support dynamic slab-based allocation. At initialization, the caller specifies total managed space and slab size. Size classes are allocated on-demand. Max 256 slabs. Valid sizes: 128 KiB to 5 MiB, multiples of 4 KiB.",
+      "also_updates": ["US7 title and acceptance scenarios", "Key Entities", "Edge Cases", "Assumptions"]
+    },
+    {
+      "id": 2,
+      "spec": "001-extent-management",
+      "requirement": "SC-005",
+      "direction": "BACKFILL",
+      "severity": "moderate",
+      "confidence": "HIGH",
+      "summary": "Update capacity criterion from 32 classes/10M slots to 256 slabs model",
+      "spec_text": "At least 32 distinct size classes with up to 10,000,000 slots per class",
+      "proposed_text": "The system supports up to 256 dynamically allocated slabs across any mix of size classes. Each 1 GiB slab provides approximately 262,000 slots."
+    },
+    {
+      "id": 3,
+      "spec": "001-extent-management",
+      "requirement": "FR-014",
+      "direction": "HUMAN_DECISION",
+      "severity": "moderate",
+      "confidence": "MEDIUM",
+      "summary": "Logger receptacle declared but unused; type mismatch prevents binding",
+      "options": {
+        "A": "Remove logger receptacle from component and spec (backfill)",
+        "B": "Implement logging and fix ILogger type mismatch (align)"
+      },
+      "questions": [
+        "Is diagnostic logging needed in the extent manager?",
+        "Should the project unify ILogger into one definition?"
+      ]
+    },
+    {
+      "id": 4,
+      "spec": "001-extent-management",
+      "requirement": "FR-006",
+      "direction": "HUMAN_DECISION",
+      "severity": "major",
+      "confidence": "MEDIUM",
+      "summary": "No public iteration API exists; open() rebuilds index internally",
+      "options": {
+        "A": "Implement iterate_extents method on IExtentManager (align)",
+        "B": "Defer/remove from spec since open() handles index rebuilding (backfill)"
+      },
+      "questions": [
+        "Do any consumers need to iterate extents via public API?",
+        "Is open() recovery path sufficient for index rebuilding?"
+      ]
+    },
+    {
+      "id": 5,
+      "spec": "001-extent-management",
+      "requirement": "FR-015",
+      "direction": "BACKFILL",
+      "severity": "major",
+      "confidence": "HIGH",
+      "summary": "Reframe iteration performance as open() startup performance",
+      "spec_text": "Iteration performance MUST be sufficient for rebuilding in-memory indexes at startup",
+      "proposed_text": "The open() operation MUST rebuild the in-memory extent index by scanning all slab bitmaps and reading valid records. Performance MUST be sufficient for startup of volumes with up to 256 slabs.",
+      "contingent_on": "Proposal 4 decision"
+    },
+    {
+      "id": 6,
+      "spec": "002-extent-benchmark",
+      "requirement": "FR-009",
+      "direction": "BACKFILL",
+      "severity": "minor",
+      "confidence": "HIGH",
+      "summary": "Acknowledge logger not bound to extent manager (doesn't use it)",
+      "spec_text": "Wire full component stack: Logger, SPDKEnv, BlockDeviceSpdkNvme, ExtentManagerComponentV1",
+      "proposed_text": "Wire component stack: SPDKEnv, BlockDeviceSpdkNvme, ExtentManagerComponentV1. Logger bound to SPDKEnv and BlockDeviceSpdkNvme only."
+    },
+    {
+      "id": 7,
+      "spec": "002-extent-benchmark",
+      "requirement": "SC-003",
+      "direction": "BACKFILL",
+      "severity": "minor",
+      "confidence": "HIGH",
+      "summary": "Revise linear-scaling claim for sub-microsecond lookups",
+      "spec_text": "N threads complete approximately N times faster for lookup operations",
+      "proposed_text": "N threads each process their share concurrently. I/O-bound ops (create, remove) show throughput improvement; in-memory ops (lookup) remain sub-microsecond regardless of thread count."
+    },
+    {
+      "id": 8,
+      "spec": "001-extent-management",
+      "requirement": "Key Entities, Edge Cases, Assumptions",
+      "direction": "BACKFILL",
+      "severity": "moderate",
+      "confidence": "HIGH",
+      "summary": "Update entities, edge cases, and assumptions to reflect slab model",
+      "changes": [
+        "Redefine Size Class as non-static",
+        "Add Slab as new entity",
+        "Update Allocation Slot definition",
+        "Update Superblock description",
+        "Replace edge cases referencing 32 classes/10M slots",
+        "Update immutability assumption"
+      ]
+    }
+  ]
+}

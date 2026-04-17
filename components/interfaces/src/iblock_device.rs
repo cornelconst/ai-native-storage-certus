@@ -447,6 +447,7 @@ define_interface! {
 pub struct RecoveryResult {
     pub extents_loaded: u64,
     pub orphans_cleaned: u64,
+    pub corrupt_records: u64,
 }
 
 define_interface! {
@@ -455,7 +456,7 @@ define_interface! {
         fn set_dma_alloc(&self, alloc: crate::spdk_types::DmaAllocFn);
 
         /// Initialize a fresh extent manager on the device.
-        fn initialize(&self, sizes: Vec<u32>, slots: Vec<u32>, ns_id: u32) -> Result<(), NvmeBlockError>;
+        fn initialize(&self, total_size_bytes: u64, slab_size_bytes: u32, ns_id: u32) -> Result<(), NvmeBlockError>;
 
         /// Open an existing extent manager and perform recovery.
         fn open(&self, ns_id: u32) -> Result<RecoveryResult, NvmeBlockError>;

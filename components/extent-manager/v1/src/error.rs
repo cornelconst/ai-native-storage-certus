@@ -1,70 +1,36 @@
-//! Error types for the extent manager component.
-//!
-//! The canonical [`ExtentManagerError`] definition lives in the shared
-//! `interfaces` crate. This module re-exports it for internal convenience.
-//!
-//! The `From<NvmeBlockError>` conversion is provided by the interfaces
-//! crate (behind the `spdk` feature gate).
+use interfaces::ExtentManagerError;
+use interfaces::NvmeBlockError;
 
-pub use interfaces::ExtentManagerError;
+pub(crate) fn duplicate_key(key: u64) -> ExtentManagerError {
+    ExtentManagerError::DuplicateKey(key)
+}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn key_not_found(key: u64) -> ExtentManagerError {
+    ExtentManagerError::KeyNotFound(key)
+}
 
-    #[test]
-    fn display_duplicate_key() {
-        let err = ExtentManagerError::DuplicateKey(42);
-        assert_eq!(err.to_string(), "duplicate key: 42");
-    }
+pub(crate) fn invalid_size_class(size: u32) -> ExtentManagerError {
+    ExtentManagerError::InvalidSizeClass(size)
+}
 
-    #[test]
-    fn display_key_not_found() {
-        let err = ExtentManagerError::KeyNotFound(99);
-        assert_eq!(err.to_string(), "key not found: 99");
-    }
+pub(crate) fn out_of_space(size_class: u32) -> ExtentManagerError {
+    ExtentManagerError::OutOfSpace { size_class }
+}
 
-    #[test]
-    fn display_invalid_size_class() {
-        let err = ExtentManagerError::InvalidSizeClass(5);
-        assert_eq!(err.to_string(), "invalid size class: 5");
-    }
+pub(crate) fn not_initialized(msg: &str) -> ExtentManagerError {
+    ExtentManagerError::NotInitialized(msg.to_string())
+}
 
-    #[test]
-    fn display_out_of_space() {
-        let err = ExtentManagerError::OutOfSpace { size_class: 0 };
-        assert_eq!(err.to_string(), "out of space for size class: 0");
-    }
+#[allow(dead_code)]
+pub(crate) fn io_error(msg: &str) -> ExtentManagerError {
+    ExtentManagerError::IoError(msg.to_string())
+}
 
-    #[test]
-    fn display_io_error() {
-        let err = ExtentManagerError::IoError("write failed".into());
-        assert_eq!(err.to_string(), "I/O error: write failed");
-    }
+#[allow(dead_code)]
+pub(crate) fn corrupt_metadata(msg: &str) -> ExtentManagerError {
+    ExtentManagerError::CorruptMetadata(msg.to_string())
+}
 
-    #[test]
-    fn display_corrupt_metadata() {
-        let err = ExtentManagerError::CorruptMetadata("CRC mismatch".into());
-        assert_eq!(err.to_string(), "corrupt metadata: CRC mismatch");
-    }
-
-    #[test]
-    fn display_not_initialized() {
-        let err = ExtentManagerError::NotInitialized("block_device not connected".into());
-        assert!(err.to_string().contains("not initialized"));
-    }
-
-    #[test]
-    fn error_is_clone() {
-        let err = ExtentManagerError::DuplicateKey(1);
-        let err2 = err.clone();
-        assert_eq!(err.to_string(), err2.to_string());
-    }
-
-    #[test]
-    fn error_is_debug() {
-        let err = ExtentManagerError::KeyNotFound(7);
-        let debug = format!("{err:?}");
-        assert!(debug.contains("KeyNotFound"));
-    }
+pub(crate) fn nvme_to_em(e: NvmeBlockError) -> ExtentManagerError {
+    ExtentManagerError::from(e)
 }

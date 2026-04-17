@@ -1,15 +1,16 @@
 [package]
 name = "extent-manager"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
+edition.workspace = true
+rust-version.workspace = true
 publish = false
 
 [dependencies]
-component-framework = { path = "../../component-framework/crates/component-framework" }
-component-core = { path = "../../component-framework/crates/component-core" }
-component-macros = { path = "../../component-framework/crates/component-macros" }
-interfaces = { path = "../../interfaces" }
+component-core.workspace = true
+component-macros.workspace = true
+component-framework.workspace = true
+interfaces = { workspace = true, features = ["spdk"] }
+crc32fast = "1"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -17,7 +18,7 @@ extent-manager = { path = ".", features = ["testing"] }
 
 [features]
 default = ["spdk"]
-spdk = ["interfaces/spdk"]
+spdk = []
 testing = []
 
 [[bench]]
@@ -25,13 +26,13 @@ name = "create_benchmark"
 harness = false
 
 [[bench]]
-name = "lookup_benchmark"
-harness = false
-
-[[bench]]
 name = "remove_benchmark"
 harness = false
 
 [[bench]]
-name = "count_benchmark"
+name = "lookup_benchmark"
+harness = false
+
+[[bench]]
+name = "iterate_benchmark"
 harness = false
