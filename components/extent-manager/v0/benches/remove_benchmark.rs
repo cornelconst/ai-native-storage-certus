@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use extent_manager::test_support::create_test_component;
-use interfaces::IExtentManager;
+use interfaces::{ExtentKey, IExtentManager};
 
 fn bench_remove_extent(c: &mut Criterion) {
     c.bench_function("remove_extent", |b| {
@@ -9,7 +9,7 @@ fn bench_remove_extent(c: &mut Criterion) {
             .initialize(100 * 128 * 4096, 128 * 4096)
             .expect("initialize");
 
-        let mut key = 0u64;
+        let mut key: ExtentKey = 0;
         b.iter_custom(|iters| {
             for i in 0..iters {
                 let k = key + i;

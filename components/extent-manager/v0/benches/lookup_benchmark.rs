@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use extent_manager::test_support::create_test_component;
-use interfaces::IExtentManager;
+use interfaces::{ExtentKey, IExtentManager};
 
 fn bench_lookup_extent(c: &mut Criterion) {
     let (component, _mock) = create_test_component();
@@ -13,7 +13,7 @@ fn bench_lookup_extent(c: &mut Criterion) {
     }
 
     c.bench_function("lookup_extent", |b| {
-        let mut key = 0u64;
+        let mut key: ExtentKey = 0;
         b.iter(|| {
             let k = key % 10_000;
             let _ = component.lookup_extent(k);

@@ -5,7 +5,7 @@ pub(crate) const RECORD_CRC_OFFSET: usize = BLOCK_SIZE - 4;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExtentMetadata {
-    pub key: u64,
+    pub key: interfaces::ExtentKey,
     pub size_class: u32,
     pub offset_lba: u64,
     pub slab_index: usize,

@@ -144,17 +144,17 @@ fn run_single_threaded(
         (
             "Create",
             run_create
-                as fn(&dyn interfaces::IExtentManager, u64, u64, u32) -> Vec<std::time::Duration>,
+                as fn(&dyn interfaces::IExtentManager, interfaces::ExtentKey, u64, u32) -> Vec<std::time::Duration>,
         ),
         (
             "Lookup",
             run_lookup
-                as fn(&dyn interfaces::IExtentManager, u64, u64, u32) -> Vec<std::time::Duration>,
+                as fn(&dyn interfaces::IExtentManager, interfaces::ExtentKey, u64, u32) -> Vec<std::time::Duration>,
         ),
         (
             "Remove",
             run_remove
-                as fn(&dyn interfaces::IExtentManager, u64, u64, u32) -> Vec<std::time::Duration>,
+                as fn(&dyn interfaces::IExtentManager, interfaces::ExtentKey, u64, u32) -> Vec<std::time::Duration>,
         ),
     ] {
         let start = Instant::now();
@@ -228,7 +228,7 @@ fn compute_key_ranges(total_count: u64, num_threads: usize) -> Vec<(u64, u64)> {
 
 fn run_create(
     iem: &dyn interfaces::IExtentManager,
-    key_start: u64,
+    key_start: interfaces::ExtentKey,
     count: u64,
     size_class: u32,
 ) -> Vec<std::time::Duration> {
@@ -249,7 +249,7 @@ fn run_create(
 
 fn run_lookup(
     iem: &dyn interfaces::IExtentManager,
-    key_start: u64,
+    key_start: interfaces::ExtentKey,
     count: u64,
     _size_class: u32,
 ) -> Vec<std::time::Duration> {
@@ -270,7 +270,7 @@ fn run_lookup(
 
 fn run_remove(
     iem: &dyn interfaces::IExtentManager,
-    key_start: u64,
+    key_start: interfaces::ExtentKey,
     count: u64,
     _size_class: u32,
 ) -> Vec<std::time::Duration> {

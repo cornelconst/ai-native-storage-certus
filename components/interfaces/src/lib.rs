@@ -40,6 +40,7 @@ pub use iblock_device::{
 pub use iblock_device::IBlockDeviceAdmin;
 
 pub use iextent_manager::Extent;
+pub use iextent_manager::ExtentKey;
 pub use iextent_manager::ExtentManagerError;
 #[cfg(feature = "spdk")]
 pub use iextent_manager::IExtentManager;

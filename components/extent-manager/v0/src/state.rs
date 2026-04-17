@@ -106,7 +106,7 @@ impl PoolState {
 
 #[derive(Debug, Default)]
 pub(crate) struct ExtentManagerState {
-    pub index: HashMap<u64, ExtentMetadata>,
+    pub index: HashMap<interfaces::ExtentKey, ExtentMetadata>,
     pub pool: Option<PoolState>,
 }
 

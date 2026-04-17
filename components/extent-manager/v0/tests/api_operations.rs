@@ -1,5 +1,5 @@
 use extent_manager::test_support::create_test_component;
-use interfaces::{ExtentManagerError, IExtentManager};
+use interfaces::{ExtentKey, ExtentManagerError, IExtentManager};
 use std::sync::Arc;
 
 const SLAB_SIZE: u32 = 128 * 4096; // 128 blocks = 512 KiB slab
@@ -185,7 +185,7 @@ fn get_extents_returns_all() {
     let extents = comp.get_extents();
     assert_eq!(extents.len(), 5);
 
-    let mut keys: Vec<u64> = extents.iter().map(|e| e.key).collect();
+    let mut keys: Vec<ExtentKey> = extents.iter().map(|e| e.key).collect();
     keys.sort();
     assert_eq!(keys, vec![1, 2, 3, 4, 5]);
 }
@@ -201,7 +201,7 @@ fn get_extents_reflects_removals() {
     let extents = comp.get_extents();
     assert_eq!(extents.len(), 2);
 
-    let mut keys: Vec<u64> = extents.iter().map(|e| e.key).collect();
+    let mut keys: Vec<ExtentKey> = extents.iter().map(|e| e.key).collect();
     keys.sort();
     assert_eq!(keys, vec![1, 3]);
 }

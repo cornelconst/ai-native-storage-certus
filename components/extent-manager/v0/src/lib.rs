@@ -10,7 +10,8 @@ pub mod test_support;
 use std::sync::{Mutex, RwLock};
 
 use interfaces::{
-    DmaAllocFn, Extent, ExtentManagerError, IBlockDevice, IExtentManager, ILogger, NvmeBlockError,
+    DmaAllocFn, Extent, ExtentKey, ExtentManagerError, IBlockDevice, IExtentManager, ILogger,
+    NvmeBlockError,
 };
 
 use component_macros::define_component;
@@ -149,7 +150,7 @@ impl IExtentManager for ExtentManagerComponentV0 {
 
     fn create_extent(
         &self,
-        key: u64,
+        key: ExtentKey,
         extent_size: u32,
     ) -> Result<Extent, ExtentManagerError> {
         let mut state = self.state.write().unwrap();
@@ -213,7 +214,7 @@ impl IExtentManager for ExtentManagerComponentV0 {
         Ok(extent)
     }
 
-    fn remove_extent(&self, key: u64) -> Result<(), ExtentManagerError> {
+    fn remove_extent(&self, key: ExtentKey) -> Result<(), ExtentManagerError> {
         let mut state = self.state.write().unwrap();
 
         let meta = state
@@ -253,7 +254,7 @@ impl IExtentManager for ExtentManagerComponentV0 {
         Ok(())
     }
 
-    fn lookup_extent(&self, key: u64) -> Result<Extent, ExtentManagerError> {
+    fn lookup_extent(&self, key: ExtentKey) -> Result<Extent, ExtentManagerError> {
         let state = self.state.read().unwrap();
 
         let meta = state
@@ -267,5 +268,12 @@ impl IExtentManager for ExtentManagerComponentV0 {
     fn get_extents(&self) -> Vec<Extent> {
         let state = self.state.read().unwrap();
         state.index.values().map(|m| m.to_extent()).collect()
+    }
+
+    fn for_each_extent(&self, cb: &mut dyn FnMut(&Extent)) {
+        let state = self.state.read().unwrap();
+        for meta in state.index.values() {
+            cb(&meta.to_extent());
+        }
     }
 }

@@ -1,11 +1,11 @@
-use interfaces::ExtentManagerError;
+use interfaces::{ExtentKey, ExtentManagerError};
 use interfaces::NvmeBlockError;
 
-pub(crate) fn duplicate_key(key: u64) -> ExtentManagerError {
+pub(crate) fn duplicate_key(key: ExtentKey) -> ExtentManagerError {
     ExtentManagerError::DuplicateKey(key)
 }
 
-pub(crate) fn key_not_found(key: u64) -> ExtentManagerError {
+pub(crate) fn key_not_found(key: ExtentKey) -> ExtentManagerError {
     ExtentManagerError::KeyNotFound(key)
 }
 

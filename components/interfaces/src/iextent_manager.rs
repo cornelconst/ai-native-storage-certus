@@ -3,21 +3,24 @@
 use component_macros::define_interface;
 use std::fmt;
 
+/// Opaque key identifying an extent.
+pub type ExtentKey = u64;
+
 /// A storage extent returned by the extent manager.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extent {
-    pub key: u64,    // Key corresponding to cache block
-    pub size: u32,   // Size of the extent in bytes
-    pub offset: u64, // Offset in bytes in the logical space
+    pub key: ExtentKey, // Key corresponding to cache block
+    pub size: u32,      // Size of the extent in bytes
+    pub offset: u64,    // Offset in bytes in the logical space
 }
 
 /// Errors returned by `IExtentManager` operations.
 #[derive(Debug, Clone)]
 pub enum ExtentManagerError {
     CorruptMetadata(String),
-    DuplicateKey(u64),
+    DuplicateKey(ExtentKey),
     IoError(String),
-    KeyNotFound(u64),
+    KeyNotFound(ExtentKey),
     NotInitialized(String),
     OutOfSpace,
 }
@@ -53,17 +56,24 @@ define_interface! {
         /// Allocate a new extent.
         fn create_extent(
             &self,
-            key: u64,
+            key: ExtentKey,
             extent_size: u32,
         ) -> Result<Extent, ExtentManagerError>;
 
         /// Free an extent
-        fn remove_extent(&self, key: u64) -> Result<(), ExtentManagerError>;
+        fn remove_extent(&self, key: ExtentKey) -> Result<(), ExtentManagerError>;
 
         /// Get info about an extent
-        fn lookup_extent(&self, key: u64) -> Result<Extent, ExtentManagerError>;
+        fn lookup_extent(&self, key: ExtentKey) -> Result<Extent, ExtentManagerError>;
 
-        /// Return all currently allocated extents.
+        /// Return all currently allocated extents. 
         fn get_extents(&self) -> Vec<Extent>;
+
+        /// Iterate through all currently allocated extents without
+        /// allocating a `Vec` or returning owned copies. The callback is
+        /// invoked while the implementation holds a read lock; callers
+        /// must not retain the reference passed to the callback after
+        /// the callback returns.
+        fn for_each_extent(&self, cb: &mut dyn FnMut(&Extent));
     }
 }
