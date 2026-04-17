@@ -1,4 +1,4 @@
-# Model Opus 4.7
+# Model Opus 4.6
 
 specify init . --ai claude
 
@@ -15,3 +15,5 @@ established good engineering practice, maintainability and meeting performance r
 + Modify the component so that the initialization function on IExtentManagerAdmin is given a size of the space to manage.  The component manages this space and dynamically allocates slabs (e.g. of 1GiB in size) from this space as new sizes are demanded.  The basic architecture is a set of slab allocators which are dynamically allocated.  
 
 /speckit-specify Create a benchmarking application, apps/extent-benchmark, for this component that measures latencies and throughput of extent allocation, lookup and remove/deletion.  The application should allow multiple client threads through a --threads option.  Add a README.md summarizing the app and giving instructions on how to run with real SPDK NVme block device.
+
++ Add a README.md file to extent-manager/v1 that summarizes the architecture of the component.

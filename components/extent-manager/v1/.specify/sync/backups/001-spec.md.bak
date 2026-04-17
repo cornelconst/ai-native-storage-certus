@@ -2,7 +2,7 @@
 
 **Feature Branch**: `001-extent-management`  
 **Created**: 2026-04-16  
-**Status**: Revised (drift sync 2026-04-16)  
+**Status**: Draft  
 **Input**: User description: "Extent Manager component managing fixed-size storage extents on NVMe SSDs with crash-consistent metadata"
 
 ## Clarifications
@@ -12,7 +12,7 @@
 - Q: How should the system handle block device I/O errors during metadata operations? → A: Propagate the error immediately to the caller with no retry and no rollback attempt.
 - Q: What is the maximum length for the optional filename field? → A: 255 bytes (POSIX NAME_MAX standard).
 - Q: What consistency guarantee should iteration provide during concurrent modification? → A: Exclusive lock — iteration blocks all concurrent modifications until complete.
-- Q: What is the expected maximum number of slots per size class? → A: Determined dynamically by slab size and count. A 1 GiB slab provides ~262,000 slots. Multiple slabs per size class are supported (up to 256 total slabs).
+- Q: What is the expected maximum number of slots per size class? → A: 10,000,000 (10 million) slots per size class.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -112,33 +112,30 @@ Multiple threads simultaneously create, remove, and look up extents. The system 
 
 ---
 
-### User Story 7 - Initialization with Slab-Based Allocation (Priority: P1)
+### User Story 7 - Initialization with Multiple Size Classes (Priority: P1)
 
-A storage system configures the extent manager at startup by specifying the total managed device space and a fixed slab size. The system writes a superblock and is ready for operations. Size classes are not pre-declared — the first `create_extent` call for a given size class dynamically allocates a slab on demand.
+A storage system configures the extent manager at startup with a set of supported extent sizes (1 to 32 sizes, ranging from 128KiB to 5MiB, all multiples of 4KiB) and the number of slots per size class. The system formats the underlying storage, writes management structures, and is ready for extent operations.
 
-**Why this priority**: Initialization is the entry point — the system cannot be used without it. Dynamic slab allocation eliminates the need to pre-commit size class configurations.
+**Why this priority**: Initialization is the entry point — the system cannot be used without it. Supporting configurable size classes is core to the design.
 
-**Independent Test**: Can be tested by initializing the manager with a total size and slab size, then verifying the system accepts creates for any valid size class and dynamically allocates slabs.
+**Independent Test**: Can be tested by initializing the manager with various size/slot configurations, then verifying the system accepts creates for each configured size and rejects unsupported sizes.
 
 **Acceptance Scenarios**:
 
-1. **Given** a block device and a total size of 100 GiB with 1 GiB slabs, **When** the manager is initialized, **Then** the superblock is written and the system is ready for operations with no pre-allocated slabs.
-2. **Given** an initialized manager with no slabs, **When** a client creates the first extent with size=128 KiB, **Then** a new slab is allocated on-demand for that size class.
-3. **Given** an initialized manager where a slab for 128 KiB is full, **When** a client creates another 128 KiB extent, **Then** a second slab is allocated for the same size class (auto-grow).
-4. **Given** an initialized manager, **When** a client creates an extent with size < 128 KiB or > 5 MiB or not a multiple of 4 KiB, **Then** the system returns an appropriate error.
-5. **Given** a previously initialized block device, **When** the manager is opened, **Then** existing slab table and metadata are loaded and all previously stored extents are accessible.
+1. **Given** a block device and configuration specifying 3 size classes (128KiB, 512KiB, 2MiB) with slot counts, **When** the manager is initialized, **Then** management structures are written and the system is ready for operations.
+2. **Given** an initialized manager, **When** a client creates an extent of an unsupported size, **Then** the system returns an appropriate error.
+3. **Given** a previously initialized block device, **When** the manager is opened (not initialized), **Then** existing metadata is loaded and all previously stored extents are accessible.
 
 ---
 
 ### Edge Cases
 
-- What happens when a slab for a size class is full? A new slab for the same size class is allocated automatically if device space remains (auto-grow).
-- What happens when all 256 slabs are allocated and no free space remains? The system returns an out-of-space error.
+- What happens when all slots for a particular size class are exhausted but other sizes have space?
 - When the block device returns an I/O error during metadata persistence, the error is propagated immediately to the caller with no retry and no rollback attempt.
-- What happens when the system is initialized with a minimal slab size (2 blocks: 1 bitmap + 1 slot)?
+- What happens when the system is initialized with the maximum number of size classes (32)?
+- What happens when the system is initialized with the minimum (1 size class, 1 slot)?
 - How does the system handle an attempt to open an uninitialized or corrupted block device?
 - During iteration, all concurrent create and remove operations are blocked until iteration completes (exclusive lock model).
-- What happens during a crash while a new slab is being allocated? The superblock is written last; if the crash occurs before the superblock update, the partially written slab is invisible to recovery.
 
 ## Requirements *(mandatory)*
 
@@ -150,7 +147,7 @@ A storage system configures the extent manager at startup by specifying the tota
 - **FR-004**: System MUST allow removal of extents by key, freeing the associated disk space for reuse.
 - **FR-005**: System MUST allow lookup of extent metadata by key, returning the on-disk location and all stored metadata.
 - **FR-006**: System MUST support iterating through all stored extents, visiting each extent exactly once. Iteration MUST hold an exclusive lock that blocks concurrent create and remove operations until iteration completes.
-- **FR-007**: System MUST support dynamic slab-based allocation. At initialization, the caller specifies total managed space (in bytes) and slab size (in bytes, must be >= 8 KiB and a multiple of 4 KiB). Size classes are NOT pre-declared; the first `create_extent` call for a given size class dynamically allocates a slab. Each slab serves exactly one size class. When a slab is full, a new slab for that class is allocated automatically if space remains. Maximum 256 slabs. Valid size classes range from 128 KiB to 5 MiB and must be multiples of 4 KiB.
+- **FR-007**: System MUST support 1 to 32 fixed extent size classes, configurable at initialization time, ranging from 128KiB to 5MiB, where each size is a multiple of 4KiB. Each size class MUST support up to 10,000,000 slots.
 - **FR-008**: System MUST maintain metadata consistency across unexpected power failures using atomic 4KiB writes.
 - **FR-009**: System MUST detect and recover from partial writes and metadata corruption on startup.
 - **FR-010**: System MUST provide re-entrant, thread-safe access to all operations.
@@ -158,18 +155,17 @@ A storage system configures the extent manager at startup by specifying the tota
 - **FR-012**: System MUST support fresh initialization (formatting) and reopening an existing volume.
 - **FR-013**: System MUST use a block device receptacle for all persistent storage operations.
 - **FR-014**: System MUST use a logger receptacle for all console/diagnostic output.
-- **FR-015**: Iteration performance MUST be sufficient for rebuilding in-memory indexes at startup. The `open()` operation rebuilds the index by scanning all slab bitmaps and reading valid records.
+- **FR-015**: Iteration performance MUST be sufficient for rebuilding in-memory indexes at startup.
 - **FR-016**: System MUST propagate block device I/O errors immediately to the caller without retry or rollback attempts.
 
 ### Key Entities
 
 - **Extent**: A fixed-size contiguous region of data on disk. Identified by a unique 64-bit key. Contains metadata: namespace ID, on-disk offset (in 4KiB blocks), size class, optional filename (max 255 bytes), optional data CRC.
-- **Size Class**: A valid extent size (128 KiB to 5 MiB, multiples of 4 KiB). Size classes are not pre-declared at initialization; any valid size can be used in `create_extent` and will trigger slab allocation on demand.
-- **Slab**: A contiguous region of device blocks serving exactly one size class. Contains a bitmap region (tracking slot allocation) followed by a record region (one 4 KiB block per slot). Allocated dynamically when a size class needs more capacity. Maximum 256 slabs. Multiple slabs can serve the same size class.
-- **Allocation Slot**: A position within a slab that can hold one extent record. Slot count per slab is determined by slab size. Tracks allocated/free state via the slab's bitmap.
-- **Superblock**: The management header stored at block 0 on the device. Contains total device blocks, slab size, a slab table (mapping each slab to its size class and start LBA), and a CRC-32 integrity check.
-- **Allocation Bitmap**: A per-slab structure tracking which slots within that slab are allocated and which are free. One bit per slot, stored in the slab's bitmap region.
-- **Extent Record**: A per-slot persistent 4 KiB block containing the extent's metadata and a CRC-32 integrity check at bytes 4092-4096.
+- **Size Class**: A supported extent size (128KiB to 5MiB, multiples of 4KiB). Each size class has a fixed number of allocation slots. Configured at initialization.
+- **Allocation Slot**: A pre-provisioned position within a size class that can hold one extent. Tracks allocated/free state. Up to 10,000,000 slots per size class.
+- **Superblock**: The management header stored at a fixed location on the block device. Contains the system configuration (size classes, slot counts) and integrity information.
+- **Allocation Bitmap**: A per-size-class structure tracking which slots are allocated and which are free.
+- **Extent Record**: A per-slot persistent structure containing the extent's metadata and an integrity check value.
 
 ## Success Criteria *(mandatory)*
 
@@ -179,7 +175,7 @@ A storage system configures the extent manager at startup by specifying the tota
 - **SC-002**: After any simulated power failure during create or remove operations, the system recovers to a fully consistent state with no space leaks and no corrupt metadata.
 - **SC-003**: Under concurrent access from 8 or more threads performing mixed operations, zero data races, deadlocks, or inconsistencies occur.
 - **SC-004**: Iterating all extents visits each extent exactly once and completes in time proportional to the number of stored extents.
-- **SC-005**: The system supports up to 256 dynamically allocated slabs across any mix of size classes. Each 1 GiB slab provides approximately 262,000 slots. Total capacity scales with total device size and slab configuration.
+- **SC-005**: The system supports at least 32 distinct size classes with up to 10,000,000 slots per class.
 - **SC-006**: All operations return meaningful errors for invalid inputs (duplicate keys, missing keys, unsupported sizes, full capacity) rather than crashing or corrupting state.
 - **SC-007**: The system can be freshly initialized and reopened an unlimited number of times without metadata degradation.
 
@@ -188,7 +184,7 @@ A storage system configures the extent manager at startup by specifying the tota
 - The underlying block device guarantees power-fail atomic writes for 4KiB-aligned, 4KiB-sized writes.
 - Extent data (the actual stored content) is managed separately — this component manages only extent metadata and allocation.
 - The block device is exclusively owned by this extent manager instance (no concurrent external writers).
-- Slab size is immutable after initialization; new slabs are allocated dynamically as needed. Reconfiguration requires re-initialization.
+- Extent sizes and slot counts are immutable after initialization; reconfiguration requires re-initialization.
 - The component-framework provides the wiring infrastructure (receptacles, providers, lifecycle management).
 - The logger receptacle is available before extent operations begin.
 - A namespace ID identifies the NVMe namespace and is provided at initialization/open time.
