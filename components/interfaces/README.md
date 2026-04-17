@@ -1,0 +1,59 @@
+# interfaces
+
+Centralized interface trait definitions for the Certus component system. Components depend on this crate for shared trait contracts rather than depending on each other directly, keeping coupling low and enabling independent development.
+
+## Interfaces
+
+### Always Available
+
+| Interface | Methods | Purpose |
+|-----------|---------|---------|
+| `IGreeter` | `greeting_prefix(&self) -> &str` | Example interface for demos |
+| `IExtentManager` | `create_extent()`, `remove_extent()`, `lookup_extent()`, `extent_count()` | Extent allocation and lookup |
+
+### SPDK Feature (`--features spdk`)
+
+| Interface | Methods | Purpose |
+|-----------|---------|---------|
+| `ISPDKEnv` | `init()`, `devices()`, `device_count()`, `is_initialized()` | SPDK environment lifecycle |
+| `IBlockDevice` | `connect_client()`, `sector_size()`, `num_sectors()`, `max_queue_depth()`, `num_io_queues()`, `max_transfer_size()`, `block_size()`, `numa_node()`, `nvme_version()`, `telemetry()` | NVMe block device client access |
+| `IBlockDeviceAdmin` | `set_pci_address()`, `initialize()` | NVMe controller configuration |
+| `IExtentManagerAdmin` | `set_dma_alloc()`, `initialize()`, `open()` | Extent manager lifecycle |
+
+### SPDK Types
+
+When the `spdk` feature is enabled, the crate also exports supporting types:
+
+- `Command`, `Completion` — NVMe IO message types
+- `DmaBuffer`, `DmaAllocFn` — DMA-safe memory with pluggable allocators
+- `PciAddress`, `PciId`, `VfioDevice` — device identification
+- `TelemetrySnapshot`, `OpHandle`, `NamespaceInfo`, `ClientChannels` — block device support types
+- `SpdkEnvError`, `BlockDeviceError`, `NvmeBlockError` — error types
+
+## Build
+
+```bash
+# Default build (no SPDK types)
+cargo build -p interfaces
+
+# With SPDK interfaces and types
+cargo build -p interfaces --features spdk
+```
+
+## Test
+
+```bash
+cargo test -p interfaces
+```
+
+## Source Layout
+
+```
+src/
+  lib.rs               Module declarations and re-exports
+  igreeter.rs          IGreeter interface
+  iextent_manager.rs   IExtentManager interface + ExtentManagerError
+  ispdk_env.rs         ISPDKEnv interface (feature = "spdk")
+  iblock_device.rs     IBlockDevice, IBlockDeviceAdmin, IExtentManagerAdmin (feature = "spdk")
+  spdk_types.rs        DmaBuffer, PciAddress, error types (feature = "spdk")
+```
