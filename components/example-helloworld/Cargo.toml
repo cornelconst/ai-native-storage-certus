@@ -8,4 +8,3 @@ publish = false
 [dependencies]
 component-framework.workspace = true
 component-core.workspace = true
-example-logger.workspace = true

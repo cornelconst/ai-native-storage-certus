@@ -12,7 +12,7 @@ pub mod test_support;
 use std::sync::{Mutex, RwLock};
 
 use interfaces::{
-    DmaAllocFn, ExtentManagerError, IBlockDevice, IExtentManager, IExtentManagerAdmin, ILogger,
+    DmaAllocFn, ExtentManagerError, IBlockDevice, IExtentManager, IExtentManagerAdmin,
     NvmeBlockError, RecoveryResult,
 };
 
@@ -30,7 +30,6 @@ define_component! {
         provides: [IExtentManager, IExtentManagerAdmin],
         receptacles: {
             block_device: IBlockDevice,
-            logger: ILogger,
         },
         fields: {
             state: RwLock<Option<ExtentManagerState>>,

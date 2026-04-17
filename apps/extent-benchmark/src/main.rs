@@ -11,7 +11,6 @@ use clap::Parser;
 use block_device_spdk_nvme::BlockDeviceSpdkNvmeComponentV1;
 use component_core::binding::bind;
 use component_core::iunknown::query;
-use example_logger::LoggerComponent;
 use extent_manager::ExtentManagerComponentV1;
 use interfaces::DmaBuffer;
 use spdk_env::SPDKEnvComponent;
@@ -26,19 +25,10 @@ fn main() {
         std::process::exit(1);
     }
 
-    let logger = LoggerComponent::new();
     let spdk_env_comp = SPDKEnvComponent::new_default();
     let block_dev = BlockDeviceSpdkNvmeComponentV1::new_default();
     let extent_mgr = ExtentManagerComponentV1::new_default();
 
-    bind(&*logger, "ILogger", &*spdk_env_comp, "logger").unwrap_or_else(|e| {
-        eprintln!("error: bind logger→spdk_env: {e}");
-        std::process::exit(2);
-    });
-    bind(&*logger, "ILogger", &*block_dev, "logger").unwrap_or_else(|e| {
-        eprintln!("error: bind logger→block_dev: {e}");
-        std::process::exit(2);
-    });
     bind(&*spdk_env_comp, "ISPDKEnv", &*block_dev, "spdk_env").unwrap_or_else(|e| {
         eprintln!("error: bind spdk_env→block_dev: {e}");
         std::process::exit(2);

@@ -55,7 +55,6 @@ fn batch_write_throughput(c: &mut Criterion) {
     use block_device_spdk_nvme::{BlockDeviceSpdkNvmeComponentV1, IBlockDevice};
     use component_core::binding::bind;
     use component_core::iunknown::query;
-    use example_logger::LoggerComponent;
     use spdk_env::SPDKEnvComponent;
 
     // Runtime hardware detection.
@@ -66,13 +65,10 @@ fn batch_write_throughput(c: &mut Criterion) {
         return;
     }
 
-    let logger = LoggerComponent::new();
     let spdk_env_comp = SPDKEnvComponent::new_default();
     let block_dev = BlockDeviceSpdkNvmeComponentV1::new_default();
 
-    bind(&*logger, "ILogger", &*block_dev, "logger").expect("bind logger");
     bind(&*spdk_env_comp, "ISPDKEnv", &*block_dev, "spdk_env").expect("bind spdk_env");
-    bind(&*logger, "ILogger", &*spdk_env_comp, "logger").expect("bind logger to spdk_env");
 
     let ienv =
         query::<dyn spdk_env::ISPDKEnv + Send + Sync>(&*spdk_env_comp).expect("ISPDKEnv query");
