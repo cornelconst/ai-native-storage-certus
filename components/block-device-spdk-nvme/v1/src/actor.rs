@@ -343,9 +343,7 @@ impl BlockDeviceHandler {
             for (&h, _) in client.pending_ops.iter() {
                 let _ = client.session.callback_tx.send(Completion::Error {
                     handle: Some(OpHandle(h)),
-                    error: NvmeBlockError::Aborted(
-                        "cancelled due to controller reset".into(),
-                    ),
+                    error: NvmeBlockError::Aborted("cancelled due to controller reset".into()),
                 });
             }
             client.pending_ops.clear();
@@ -369,7 +367,10 @@ impl BlockDeviceHandler {
             .iter()
             .find(|c| c.session.id == requesting_client_id)
         {
-            let _ = client.session.callback_tx.send(Completion::ResetDone { result });
+            let _ = client
+                .session
+                .callback_tx
+                .send(Completion::ResetDone { result });
         }
     }
 

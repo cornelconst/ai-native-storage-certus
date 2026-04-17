@@ -12,17 +12,10 @@ static SPDK_ENV_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Perform the full initialization sequence for an SPDKEnvComponent.
 ///
-/// Order: logger check -> singleton check -> VFIO checks -> permissions ->
+/// Order: singleton check -> VFIO checks -> permissions ->
 /// hugepages -> SPDK env init -> PCI enumeration.
 pub(crate) fn do_init(comp: &SPDKEnvComponent) -> Result<(), SpdkEnvError> {
-    // 1. Logger connectivity check.
-    if !comp.logger.is_connected() {
-        return Err(SpdkEnvError::LoggerNotConnected(
-            "Logger receptacle not connected. Call comp.logger.connect() before init().".into(),
-        ));
-    }
-
-    // 2. Singleton check.
+    // 1. Singleton check.
     if SPDK_ENV_ACTIVE
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -47,29 +40,19 @@ fn do_init_inner(comp: &SPDKEnvComponent) -> Result<(), SpdkEnvError> {
     checks::check_vfio_permissions()?;
     checks::check_hugepages()?;
 
-    // Log progress.
-    log_info(
-        comp,
-        "Pre-flight checks passed. Initializing SPDK/DPDK environment...",
-    );
+    eprintln!("[spdk-env] Pre-flight checks passed. Initializing SPDK/DPDK environment...");
 
     // 4. Initialize SPDK environment.
     init_spdk_env()?;
 
-    log_info(
-        comp,
-        "SPDK/DPDK environment initialized. Enumerating devices...",
-    );
+    eprintln!("[spdk-env] SPDK/DPDK environment initialized. Enumerating devices...");
 
     // 5. Enumerate PCI devices.
     let devices = enumerate_devices(comp)?;
 
-    log_info(
-        comp,
-        &format!(
-            "Device enumeration complete. Found {} device(s).",
-            devices.len()
-        ),
+    eprintln!(
+        "[spdk-env] Device enumeration complete. Found {} device(s).",
+        devices.len()
     );
 
     // Store discovered devices.
@@ -205,15 +188,4 @@ pub(crate) fn do_fini() {
         spdk_sys::spdk_env_fini();
     }
     SPDK_ENV_ACTIVE.store(false, Ordering::Release);
-}
-
-/// Send an info-level log message through the logger receptacle.
-fn log_info(comp: &SPDKEnvComponent, msg: &str) {
-    if let Ok(logger) = comp.logger.get() {
-        // ILogger only has name() — for actual log delivery we'd use the actor handle.
-        // For now, just acknowledge the logger is connected.
-        let _ = logger.name();
-    }
-    // Also print to stderr for direct visibility during initialization.
-    eprintln!("[spdk-env] {msg}");
 }

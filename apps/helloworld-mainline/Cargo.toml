@@ -7,5 +7,4 @@ publish = false
 
 [dependencies]
 component-framework.workspace = true
-example-logger.workspace = true
 example-helloworld.workspace = true

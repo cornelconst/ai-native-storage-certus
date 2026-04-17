@@ -24,7 +24,6 @@ use block_device_spdk_nvme::{BlockDeviceSpdkNvmeComponentV1, Command, Completion
 use component_core::binding::bind;
 use component_core::iunknown::query;
 use component_core::numa::{set_thread_affinity, CpuSet, NumaTopology};
-use example_logger::LoggerComponent;
 use spdk_env::SPDKEnvComponent;
 
 use config::BenchConfig;
@@ -33,21 +32,12 @@ use stats::FinalReport;
 fn main() {
     let mut config = BenchConfig::parse();
 
-    // --- Component wiring (same pattern as benches/latency.rs) ---
-    let logger = LoggerComponent::new();
+    // --- Component wiring ---
     let spdk_env_comp = SPDKEnvComponent::new_default();
     let block_dev = BlockDeviceSpdkNvmeComponentV1::new_default();
 
-    bind(&*logger, "ILogger", &*block_dev, "logger").unwrap_or_else(|e| {
-        eprintln!("error: failed to bind logger: {e}");
-        std::process::exit(2);
-    });
     bind(&*spdk_env_comp, "ISPDKEnv", &*block_dev, "spdk_env").unwrap_or_else(|e| {
         eprintln!("error: failed to bind spdk_env: {e}");
-        std::process::exit(2);
-    });
-    bind(&*logger, "ILogger", &*spdk_env_comp, "logger").unwrap_or_else(|e| {
-        eprintln!("error: failed to bind logger to spdk_env: {e}");
         std::process::exit(2);
     });
 

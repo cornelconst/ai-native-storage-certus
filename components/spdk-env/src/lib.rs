@@ -12,7 +12,6 @@
 //! use component_framework::prelude::*;
 //!
 //! let comp = SPDKEnvComponent::new();
-//! // comp.logger.connect(logger_arc).unwrap();
 //! // let env = query_interface!(comp, ISPDKEnv).unwrap();
 //! // env.init().unwrap();
 //! // for dev in env.devices() { /* ... */ }
@@ -29,7 +28,6 @@ pub use dma::DmaBuffer;
 pub use error::SpdkEnvError;
 
 use component_framework::{define_component, define_interface};
-use example_logger::ILogger;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::RwLock;
 
@@ -54,9 +52,6 @@ define_component! {
     pub SPDKEnvComponent {
         version: "0.1.0",
         provides: [ISPDKEnv],
-        receptacles: {
-            logger: ILogger,
-        },
         fields: {
             discovered_devices: RwLock<Vec<VfioDevice>>,
             initialized: AtomicBool,
@@ -101,19 +96,10 @@ impl Drop for SPDKEnvComponent {
 mod tests {
     use super::*;
     use component_framework::iunknown::{query, IUnknown};
-    use example_logger::{ILogger, LoggerComponent};
     use std::sync::Arc;
 
     fn make_component() -> Arc<SPDKEnvComponent> {
         SPDKEnvComponent::new(RwLock::new(Vec::new()), AtomicBool::new(false))
-    }
-
-    fn make_wired_component() -> Arc<SPDKEnvComponent> {
-        let comp = make_component();
-        let logger = LoggerComponent::new();
-        let ilogger = query::<dyn ILogger + Send + Sync>(&*logger).expect("ILogger not found");
-        comp.logger.connect(ilogger).expect("connect failed");
-        comp
     }
 
     // --- Component construction ---
@@ -144,41 +130,6 @@ mod tests {
         let comp = make_component();
         let env = query::<dyn ISPDKEnv + Send + Sync>(&*comp);
         assert!(env.is_some());
-    }
-
-    // --- Logger receptacle ---
-
-    #[test]
-    fn logger_receptacle_initially_disconnected() {
-        let comp = make_component();
-        assert!(!comp.logger.is_connected());
-    }
-
-    #[test]
-    fn logger_receptacle_connect() {
-        let comp = make_component();
-        let logger = LoggerComponent::new();
-        let ilogger = query::<dyn ILogger + Send + Sync>(&*logger).expect("ILogger not found");
-        assert!(comp.logger.connect(ilogger).is_ok());
-        assert!(comp.logger.is_connected());
-    }
-
-    // --- init() pre-flight failures ---
-
-    #[test]
-    fn init_fails_without_logger() {
-        let comp = make_component();
-        let result = comp.init();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, SpdkEnvError::LoggerNotConnected(_)));
-    }
-
-    #[test]
-    fn init_logger_error_is_actionable() {
-        let comp = make_component();
-        let err = comp.init().unwrap_err();
-        assert!(err.to_string().contains("connect"));
     }
 
     // --- devices() and device_count() with pre-populated state ---
@@ -284,20 +235,5 @@ mod tests {
         let comp = make_component();
         assert!(!comp.is_initialized());
         drop(comp);
-    }
-
-    // --- Wired component tests ---
-
-    #[test]
-    fn wired_component_has_logger() {
-        let comp = make_wired_component();
-        assert!(comp.logger.is_connected());
-    }
-
-    #[test]
-    fn wired_component_still_not_initialized() {
-        let comp = make_wired_component();
-        // Wiring logger does not auto-initialize.
-        assert!(!comp.is_initialized());
     }
 }

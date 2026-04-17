@@ -22,8 +22,6 @@ pub enum SpdkEnvError {
     PermissionDenied(String),
     /// No hugepages configured for DPDK.
     HugepagesNotConfigured(String),
-    /// Logging receptacle not connected before `init()`.
-    LoggerNotConnected(String),
     /// Another SPDK environment instance is already active in this process.
     AlreadyInitialized(String),
     /// SPDK/DPDK environment initialization failed.
@@ -42,7 +40,6 @@ impl fmt::Display for SpdkEnvError {
             SpdkEnvError::HugepagesNotConfigured(msg) => {
                 write!(f, "Hugepages not configured: {msg}")
             }
-            SpdkEnvError::LoggerNotConnected(msg) => write!(f, "Logger not connected: {msg}"),
             SpdkEnvError::AlreadyInitialized(msg) => write!(f, "Already initialized: {msg}"),
             SpdkEnvError::InitFailed(msg) => write!(f, "SPDK init failed: {msg}"),
             SpdkEnvError::DeviceProbeFailed(msg) => write!(f, "Device probe failed: {msg}"),
@@ -84,8 +81,6 @@ pub enum BlockDeviceError {
     DmaAllocationFailed(String),
     /// The SPDK environment receptacle is not connected or not initialized.
     EnvNotInitialized(String),
-    /// The logger receptacle is not connected.
-    LoggerNotConnected(String),
 }
 
 impl fmt::Display for BlockDeviceError {
@@ -110,9 +105,6 @@ impl fmt::Display for BlockDeviceError {
             }
             BlockDeviceError::EnvNotInitialized(msg) => {
                 write!(f, "SPDK environment not initialized: {msg}")
-            }
-            BlockDeviceError::LoggerNotConnected(msg) => {
-                write!(f, "Logger not connected: {msg}")
             }
         }
     }

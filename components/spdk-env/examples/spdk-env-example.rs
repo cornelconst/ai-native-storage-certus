@@ -1,10 +1,9 @@
 //! Example: Initialize the SPDK environment and enumerate VFIO-attached devices.
 //!
-//! Demonstrates the construct-wire-init lifecycle of the SPDKEnvComponent:
+//! Demonstrates the construct-init lifecycle of the SPDKEnvComponent:
 //! 1. Create the component
-//! 2. Create and wire the logger
-//! 3. Call init() to perform VFIO checks and SPDK initialization
-//! 4. Query discovered devices via ISPDKEnv
+//! 2. Call init() to perform VFIO checks and SPDK initialization
+//! 3. Query discovered devices via ISPDKEnv
 //!
 //! # Requirements
 //!
@@ -20,7 +19,6 @@
 //! ```
 
 use component_framework::iunknown::{query, IUnknown};
-use example_logger::{ILogger, LoggerComponent};
 use spdk_env::{ISPDKEnv, SPDKEnvComponent};
 
 fn main() {
@@ -33,27 +31,17 @@ fn main() {
     );
     println!("SPDKEnv component: version={}", spdk_comp.version());
 
-    // 2. Create the logger component and wire it.
-    let logger_comp = LoggerComponent::new();
-    let ilogger = query::<dyn ILogger + Send + Sync>(&*logger_comp)
-        .expect("ILogger not found on LoggerComponent");
-    spdk_comp
-        .logger
-        .connect(ilogger)
-        .expect("Failed to connect logger receptacle");
-    println!("Logger connected: {}", logger_comp.version());
-
-    // 3. Query ISPDKEnv interface.
+    // 2. Query ISPDKEnv interface.
     let env = query::<dyn ISPDKEnv + Send + Sync>(&*spdk_comp)
         .expect("ISPDKEnv not found on SPDKEnvComponent");
 
-    // 4. Initialize (performs VFIO checks, SPDK init, device enumeration).
+    // 3. Initialize (performs VFIO checks, SPDK init, device enumeration).
     println!("\nInitializing SPDK environment...");
     match env.init() {
         Ok(()) => {
             println!("Initialization successful!\n");
 
-            // 5. Query devices.
+            // 4. Query devices.
             let devices = env.devices();
             println!("Discovered {} VFIO-attached device(s):", devices.len());
             for dev in &devices {

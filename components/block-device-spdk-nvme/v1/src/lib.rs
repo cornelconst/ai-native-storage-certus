@@ -23,7 +23,7 @@
 //! use component_framework::iunknown::query;
 //!
 //! let comp = BlockDeviceSpdkNvmeComponent::new(pci_address);
-//! // Wire receptacles: comp.logger, comp.spdk_env
+//! // Wire receptacles: comp.spdk_env
 //! // let ibd = query::<dyn IBlockDevice + Send + Sync>(&*comp).unwrap();
 //! // let channels = ibd.connect_client().unwrap();
 //! ```
@@ -49,7 +49,6 @@ use std::sync::{Mutex, RwLock};
 use component_core::actor::{Actor, ActorHandle};
 use component_core::channel::spsc::SpscChannel;
 use component_framework::define_component;
-use example_logger::ILogger;
 use interfaces::PciAddress;
 use spdk_env::ISPDKEnv;
 
@@ -76,7 +75,6 @@ define_component! {
         version: "0.1.0",
         provides: [IBlockDevice, IBlockDeviceAdmin],
         receptacles: {
-            logger: ILogger,
             spdk_env: ISPDKEnv,
         },
         fields: {
@@ -461,7 +459,6 @@ mod tests {
     fn component_has_receptacles() {
         let comp = make_component();
         let receps = comp.receptacles();
-        assert!(receps.iter().any(|r| r.name == "logger"));
         assert!(receps.iter().any(|r| r.name == "spdk_env"));
     }
 

@@ -6,7 +6,6 @@ members = [
     "components/component-framework/crates/component-framework",
     "components/component-framework/examples",
     "components/example-helloworld",
-    "components/example-logger",
     "components/spdk-sys",
     "components/interfaces",
     "components/spdk-env",
@@ -26,7 +25,6 @@ default-members = [
     "components/component-framework/crates/component-framework",
     "components/component-framework/examples",
     "components/example-helloworld",
-    "components/example-logger",
     "apps/helloworld-mainline",
 ]
 
@@ -41,7 +39,6 @@ license = "MIT"
 component-core = { path = "components/component-framework/crates/component-core" }
 component-macros = { path = "components/component-framework/crates/component-macros" }
 component-framework = { path = "components/component-framework/crates/component-framework" }
-example-logger = { path = "components/example-logger" }
 example-helloworld = { path = "components/example-helloworld" }
 interfaces = { path = "components/interfaces" }
 spdk-sys = { path = "components/spdk-sys" }
