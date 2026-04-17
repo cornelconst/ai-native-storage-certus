@@ -1,7 +1,7 @@
 use component_core::channel::SpscChannel;
 use interfaces::{
     ClientChannels, Command, Completion, DmaAllocFn, DmaBuffer, IBlockDevice, IExtentManagerAdmin,
-    NvmeBlockError, OpHandle, TelemetrySnapshot,
+    ILogger, NvmeBlockError, OpHandle, TelemetrySnapshot,
 };
 use std::collections::HashMap;
 use std::sync::{
@@ -262,6 +262,13 @@ pub fn create_test_component() -> (Arc<crate::ExtentManagerComponentV1>, Arc<Moc
         .block_device
         .connect(mock.clone() as Arc<dyn IBlockDevice>)
         .expect("connect mock block device");
+
+    let logger = logger::LoggerComponentV1::new_default();
+    component
+        .logger
+        .connect(logger as Arc<dyn ILogger + Send + Sync>)
+        .expect("connect logger");
+
     component.set_dma_alloc(heap_dma_alloc());
     (component, mock)
 }
