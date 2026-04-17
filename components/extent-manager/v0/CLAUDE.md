@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Extent Manager v1 — a fixed-size storage extent manager for the Certus storage system. Manages extent allocation, metadata persistence, and crash recovery on NVMe SSDs using 4KiB-atomic writes. Built with the component-framework using `define_component!` and `define_interface!` macros.
+Extent Manager v0 — a fixed-size storage extent manager for the Certus storage system. Manages extent allocation, metadata persistence, and crash recovery on NVMe SSDs using 4KiB-atomic writes. Built with the component-framework using `define_component!` and `define_interface!` macros.
 
-This is v1, a from-scratch reimplementation of v0 (at `../v0/`). The design spec lives at `info/DESIGN.md`. Use v0 as architectural reference but not as code to copy — v1 should be a clean implementation.
+The design spec lives at `info/DESIGN.md`.
 
 ## Build and Test Commands
 
@@ -37,7 +37,7 @@ cargo fmt -p extent-manager --check \
 ### Component Wiring
 
 ```
-[IBlockDevice receptacle] --> ExtentManagerComponentV1 --> [IExtentManager provider]
+[IBlockDevice receptacle] --> ExtentManagerComponentV0 --> [IExtentManager provider]
 [ILogger receptacle]      -->                          --> [IExtentManagerAdmin provider]
 ```
 

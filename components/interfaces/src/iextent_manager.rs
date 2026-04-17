@@ -9,8 +9,6 @@ pub struct Extent {
     pub key: u64,
     pub size: u32,
     pub offset: u64,
-    pub filename: String,
-    pub crc: u32,
 }
 
 /// Errors returned by `IExtentManager` operations.
@@ -57,8 +55,6 @@ define_interface! {
             &self,
             key: u64,
             extent_size: u32,
-            filename: &str,
-            data_crc: u32,
         ) -> Result<Extent, ExtentManagerError>;
 
         /// Free an extent

@@ -12,7 +12,7 @@ fn bench_create_extent(c: &mut Criterion) {
         let mut key = 0u64;
         b.iter(|| {
             key += 1;
-            let _ = component.create_extent(key, 131072, "", 0);
+            let _ = component.create_extent(key, 131072);
         });
     });
 }

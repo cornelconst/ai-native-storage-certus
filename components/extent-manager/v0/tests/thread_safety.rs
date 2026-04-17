@@ -1,5 +1,5 @@
 use extent_manager::test_support::create_test_component;
-use extent_manager::ExtentManagerComponentV1;
+use extent_manager::ExtentManagerComponentV0;
 use interfaces::IExtentManager;
 use std::sync::Arc;
 use std::thread;
@@ -15,11 +15,11 @@ fn concurrent_creates_no_duplicates() {
 
     let handles: Vec<_> = (0..4)
         .map(|t| {
-            let comp: Arc<ExtentManagerComponentV1> = Arc::clone(&comp);
+            let comp: Arc<ExtentManagerComponentV0> = Arc::clone(&comp);
             thread::spawn(move || {
                 for i in 0..100u64 {
                     let key = t * 1000 + i;
-                    comp.create_extent(key, EXTENT_SIZE, "", 0).expect("create");
+                    comp.create_extent(key, EXTENT_SIZE).expect("create");
                 }
             })
         })
@@ -42,12 +42,12 @@ fn concurrent_lookups() {
     comp.initialize(TOTAL_SIZE, SLAB_SIZE).expect("init");
 
     for i in 0..50u64 {
-        comp.create_extent(i, EXTENT_SIZE, "", 0).expect("create");
+        comp.create_extent(i, EXTENT_SIZE).expect("create");
     }
 
     let handles: Vec<_> = (0..4)
         .map(|_| {
-            let comp: Arc<ExtentManagerComponentV1> = Arc::clone(&comp);
+            let comp: Arc<ExtentManagerComponentV0> = Arc::clone(&comp);
             thread::spawn(move || {
                 for i in 0..50u64 {
                     comp.lookup_extent(i).expect("lookup");
@@ -67,19 +67,19 @@ fn concurrent_create_and_lookup() {
     comp.initialize(TOTAL_SIZE, SLAB_SIZE).expect("init");
 
     for i in 0..100u64 {
-        comp.create_extent(i, EXTENT_SIZE, "", 0).expect("create");
+        comp.create_extent(i, EXTENT_SIZE).expect("create");
     }
 
-    let comp_writer: Arc<ExtentManagerComponentV1> = Arc::clone(&comp);
+    let comp_writer: Arc<ExtentManagerComponentV0> = Arc::clone(&comp);
     let writer = thread::spawn(move || {
         for i in 100..200u64 {
             comp_writer
-                .create_extent(i, EXTENT_SIZE, "", 0)
+                .create_extent(i, EXTENT_SIZE)
                 .expect("create");
         }
     });
 
-    let comp_reader: Arc<ExtentManagerComponentV1> = Arc::clone(&comp);
+    let comp_reader: Arc<ExtentManagerComponentV0> = Arc::clone(&comp);
     let reader = thread::spawn(move || {
         for i in 0..100u64 {
             comp_reader.lookup_extent(i).expect("lookup");

@@ -11,7 +11,7 @@ use clap::Parser;
 use block_device_spdk_nvme::BlockDeviceSpdkNvmeComponentV1;
 use component_core::binding::bind;
 use component_core::iunknown::query;
-use extent_manager::ExtentManagerComponentV1;
+use extent_manager::ExtentManagerComponentV0;
 use interfaces::DmaBuffer;
 use spdk_env::SPDKEnvComponent;
 
@@ -27,7 +27,7 @@ fn main() {
 
     let spdk_env_comp = SPDKEnvComponent::new_default();
     let block_dev = BlockDeviceSpdkNvmeComponentV1::new_default();
-    let extent_mgr = ExtentManagerComponentV1::new_default();
+    let extent_mgr = ExtentManagerComponentV0::new_default();
 
     bind(&*spdk_env_comp, "ISPDKEnv", &*block_dev, "spdk_env").unwrap_or_else(|e| {
         eprintln!("error: bind spdk_env→block_dev: {e}");
@@ -236,7 +236,7 @@ fn run_create(
     for i in 0..count {
         let key = key_start + i;
         let start = Instant::now();
-        match iem.create_extent(key, size_class, "", 0) {
+        match iem.create_extent(key, size_class) {
             Ok(_) => {}
             Err(e) => {
                 eprintln!("  create_extent({key}) failed: {e}");

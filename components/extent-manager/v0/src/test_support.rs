@@ -255,9 +255,9 @@ unsafe extern "C" fn heap_free(ptr: *mut std::ffi::c_void) {
     }
 }
 
-pub fn create_test_component() -> (Arc<crate::ExtentManagerComponentV1>, Arc<MockBlockDevice>) {
+pub fn create_test_component() -> (Arc<crate::ExtentManagerComponentV0>, Arc<MockBlockDevice>) {
     let mock = Arc::new(MockBlockDevice::new());
-    let component = crate::ExtentManagerComponentV1::new_inner();
+    let component = crate::ExtentManagerComponentV0::new_inner();
     component
         .block_device
         .connect(mock.clone() as Arc<dyn IBlockDevice>)

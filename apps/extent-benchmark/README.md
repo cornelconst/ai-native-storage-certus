@@ -1,6 +1,6 @@
 # Extent Manager Benchmark
 
-Measures latency and throughput of the ExtentManagerComponentV1's core operations:
+Measures latency and throughput of the ExtentManagerComponentV0's core operations:
 **create_extent**, **lookup_extent**, and **remove_extent**.
 
 Wires the full SPDK component stack (Logger, SPDKEnv, BlockDeviceSpdkNvme, ExtentManager)

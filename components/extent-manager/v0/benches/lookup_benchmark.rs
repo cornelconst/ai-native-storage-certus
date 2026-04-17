@@ -9,7 +9,7 @@ fn bench_lookup_extent(c: &mut Criterion) {
         .expect("initialize");
 
     for i in 0..10_000u64 {
-        component.create_extent(i, 131072, "", 0).expect("create");
+        component.create_extent(i, 131072).expect("create");
     }
 
     c.bench_function("lookup_extent", |b| {

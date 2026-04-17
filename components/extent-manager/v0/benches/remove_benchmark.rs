@@ -13,7 +13,7 @@ fn bench_remove_extent(c: &mut Criterion) {
         b.iter_custom(|iters| {
             for i in 0..iters {
                 let k = key + i;
-                component.create_extent(k, 131072, "", 0).expect("create");
+                component.create_extent(k, 131072).expect("create");
             }
             let start = std::time::Instant::now();
             for i in 0..iters {

@@ -121,7 +121,7 @@ cargo bench -p extent-manager --bench lookup_benchmark
 
 ```
 src/
-  lib.rs            ExtentManagerComponentV1 definition, IExtentManager impl
+  lib.rs            ExtentManagerComponentV0 definition, IExtentManager impl
   metadata.rs       ExtentMetadata, OnDiskExtentRecord (4KiB block with CRC-32)
   bitmap.rs         AllocationBitmap (bit-per-slot, multi-block serialization)
   block_device.rs   BlockDeviceClient wrapper (read_block/write_block at 4KiB granularity)

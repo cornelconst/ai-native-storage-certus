@@ -1,7 +1,6 @@
 use crc32fast::Hasher;
 
 pub(crate) const BLOCK_SIZE: usize = 4096;
-pub(crate) const MAX_FILENAME_LEN: usize = 255;
 pub(crate) const RECORD_CRC_OFFSET: usize = BLOCK_SIZE - 4;
 
 #[derive(Debug, Clone)]
@@ -9,8 +8,6 @@ pub(crate) struct ExtentMetadata {
     pub key: u64,
     pub size_class: u32,
     pub offset_lba: u64,
-    pub filename: Option<String>,
-    pub data_crc: Option<u32>,
     pub slab_index: usize,
 }
 
@@ -20,8 +17,6 @@ impl ExtentMetadata {
             key: self.key,
             size: self.size_class,
             offset: self.offset_lba,
-            filename: self.filename.clone().unwrap_or_default(),
-            crc: self.data_crc.unwrap_or(0),
         }
     }
 }
@@ -39,19 +34,6 @@ impl OnDiskExtentRecord {
         data[8..12].copy_from_slice(&meta.size_class.to_le_bytes());
         data[12..20].copy_from_slice(&meta.offset_lba.to_le_bytes());
 
-        let has_crc: u8 = if meta.data_crc.is_some() { 1 } else { 0 };
-        data[20] = has_crc;
-        if let Some(crc) = meta.data_crc {
-            data[21..25].copy_from_slice(&crc.to_le_bytes());
-        }
-
-        if let Some(ref fname) = meta.filename {
-            let bytes = fname.as_bytes();
-            let len = bytes.len().min(MAX_FILENAME_LEN);
-            data[25..27].copy_from_slice(&(len as u16).to_le_bytes());
-            data[27..27 + len].copy_from_slice(&bytes[..len]);
-        }
-
         let crc = compute_record_crc(&data);
         data[RECORD_CRC_OFFSET..BLOCK_SIZE].copy_from_slice(&crc.to_le_bytes());
 
@@ -67,24 +49,11 @@ impl OnDiskExtentRecord {
 
         let size_class = u32::from_le_bytes(self.data[8..12].try_into().ok()?);
         let offset_lba = u64::from_le_bytes(self.data[12..20].try_into().ok()?);
-        let has_crc = self.data[20] != 0;
-        let data_crc_val = u32::from_le_bytes(self.data[21..25].try_into().ok()?);
-        let filename_len = u16::from_le_bytes(self.data[25..27].try_into().ok()?) as usize;
-
-        let filename = if filename_len > 0 && filename_len <= MAX_FILENAME_LEN {
-            Some(String::from_utf8_lossy(&self.data[27..27 + filename_len]).into_owned())
-        } else {
-            None
-        };
-
-        let data_crc = if has_crc { Some(data_crc_val) } else { None };
 
         Some(ExtentMetadata {
             key,
             size_class,
             offset_lba,
-            filename,
-            data_crc,
             slab_index: 0,
         })
     }
@@ -121,13 +90,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn record_roundtrip_no_optional_fields() {
+    fn record_roundtrip() {
         let meta = ExtentMetadata {
             key: 42,
             size_class: 131072,
             offset_lba: 100,
-            filename: None,
-            data_crc: None,
             slab_index: 0,
         };
         let record = OnDiskExtentRecord::from_metadata(&meta);
@@ -136,26 +103,6 @@ mod tests {
         assert_eq!(recovered.key, 42);
         assert_eq!(recovered.size_class, 131072);
         assert_eq!(recovered.offset_lba, 100);
-        assert!(recovered.filename.is_none());
-        assert!(recovered.data_crc.is_none());
-    }
-
-    #[test]
-    fn record_roundtrip_with_filename_and_crc() {
-        let meta = ExtentMetadata {
-            key: 99,
-            size_class: 524288,
-            offset_lba: 500,
-            filename: Some("test-file.dat".to_string()),
-            data_crc: Some(0xDEADBEEF),
-            slab_index: 0,
-        };
-        let record = OnDiskExtentRecord::from_metadata(&meta);
-        assert!(record.verify_crc());
-        let recovered = record.to_metadata().unwrap();
-        assert_eq!(recovered.key, 99);
-        assert_eq!(recovered.filename.as_deref(), Some("test-file.dat"));
-        assert_eq!(recovered.data_crc, Some(0xDEADBEEF));
     }
 
     #[test]
@@ -173,8 +120,6 @@ mod tests {
             key: 1,
             size_class: 131072,
             offset_lba: 0,
-            filename: None,
-            data_crc: None,
             slab_index: 0,
         };
         let mut record = OnDiskExtentRecord::from_metadata(&meta);
@@ -183,37 +128,16 @@ mod tests {
     }
 
     #[test]
-    fn max_filename_length() {
-        let long_name = "a".repeat(MAX_FILENAME_LEN);
-        let meta = ExtentMetadata {
-            key: 7,
-            size_class: 131072,
-            offset_lba: 10,
-            filename: Some(long_name.clone()),
-            data_crc: None,
-            slab_index: 0,
-        };
-        let record = OnDiskExtentRecord::from_metadata(&meta);
-        assert!(record.verify_crc());
-        let recovered = record.to_metadata().unwrap();
-        assert_eq!(recovered.filename.as_deref(), Some(long_name.as_str()));
-    }
-
-    #[test]
     fn metadata_to_extent() {
         let meta = ExtentMetadata {
             key: 123,
             size_class: 262144,
             offset_lba: 999,
-            filename: Some("hello.bin".to_string()),
-            data_crc: Some(0x12345678),
             slab_index: 0,
         };
         let extent = meta.to_extent();
         assert_eq!(extent.key, 123);
         assert_eq!(extent.size, 262144);
         assert_eq!(extent.offset, 999);
-        assert_eq!(extent.filename, "hello.bin");
-        assert_eq!(extent.crc, 0x12345678);
     }
 }

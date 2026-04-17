@@ -7,7 +7,7 @@ const TOTAL_SIZE: u64 = 100 * 128 * 4096; // room for ~100 slabs
 const EXTENT_SIZE: u32 = 131072; // 128 KiB
 
 fn setup() -> (
-    Arc<extent_manager::ExtentManagerComponentV1>,
+    Arc<extent_manager::ExtentManagerComponentV0>,
     Arc<extent_manager::test_support::MockBlockDevice>,
 ) {
     let (comp, mock) = create_test_component();
@@ -45,28 +45,28 @@ fn initialize_rejects_unaligned_slab() {
 #[test]
 fn create_extent_basic() {
     let (comp, _mock) = setup();
-    let result = comp.create_extent(1, EXTENT_SIZE, "test.dat", 0);
+    let result = comp.create_extent(1, EXTENT_SIZE);
     assert!(result.is_ok());
     comp.lookup_extent(1).expect("extent should exist");
 }
 
 #[test]
-fn create_extent_with_filename_and_crc() {
+fn create_extent_fields() {
     let (comp, _mock) = setup();
-    let result = comp.create_extent(42, EXTENT_SIZE, "myfile.dat", 0xDEADBEEF);
+    let result = comp.create_extent(42, EXTENT_SIZE);
     assert!(result.is_ok());
 
     let extent = comp.lookup_extent(42).expect("lookup");
-    assert_eq!(extent.filename, "myfile.dat");
-    assert_eq!(extent.crc, 0xDEADBEEF);
+    assert_eq!(extent.key, 42);
+    assert_eq!(extent.size, EXTENT_SIZE);
 }
 
 #[test]
 fn create_extent_duplicate_key_fails() {
     let (comp, _mock) = setup();
-    comp.create_extent(1, EXTENT_SIZE, "", 0)
+    comp.create_extent(1, EXTENT_SIZE)
         .expect("first create");
-    let err = comp.create_extent(1, EXTENT_SIZE, "", 0);
+    let err = comp.create_extent(1, EXTENT_SIZE);
     assert!(matches!(err, Err(ExtentManagerError::DuplicateKey(_))));
 }
 
@@ -74,7 +74,7 @@ fn create_extent_duplicate_key_fails() {
 fn lookup_extent_basic() {
     let (comp, _mock) = setup();
     let created = comp
-        .create_extent(1, EXTENT_SIZE, "hello.txt", 0xABCD)
+        .create_extent(1, EXTENT_SIZE)
         .expect("create");
     let looked_up = comp.lookup_extent(1).expect("lookup");
     assert_eq!(created, looked_up);
@@ -90,7 +90,7 @@ fn lookup_extent_not_found() {
 #[test]
 fn remove_extent_basic() {
     let (comp, _mock) = setup();
-    comp.create_extent(1, EXTENT_SIZE, "", 0).expect("create");
+    comp.create_extent(1, EXTENT_SIZE).expect("create");
     comp.remove_extent(1).expect("remove");
 
     let err = comp.lookup_extent(1);
@@ -107,17 +107,17 @@ fn remove_extent_not_found() {
 #[test]
 fn remove_then_create_reuses_slot() {
     let (comp, _mock) = setup();
-    comp.create_extent(1, EXTENT_SIZE, "", 0).expect("create 1");
+    comp.create_extent(1, EXTENT_SIZE).expect("create 1");
     comp.remove_extent(1).expect("remove 1");
-    comp.create_extent(2, EXTENT_SIZE, "", 0).expect("create 2");
+    comp.create_extent(2, EXTENT_SIZE).expect("create 2");
     comp.lookup_extent(2).expect("new extent should exist");
 }
 
 #[test]
 fn multiple_extent_sizes() {
     let (comp, _mock) = setup();
-    comp.create_extent(1, 131072, "", 0).expect("create 128K");
-    comp.create_extent(2, 262144, "", 0).expect("create 256K");
+    comp.create_extent(1, 131072).expect("create 128K");
+    comp.create_extent(2, 262144).expect("create 256K");
 
     comp.remove_extent(1).expect("remove 128K");
     comp.lookup_extent(2).expect("256K still exists");
@@ -129,15 +129,15 @@ fn out_of_space() {
     let block_size = 4096u64;
     comp.initialize(3 * block_size, 2 * 4096).expect("init");
 
-    comp.create_extent(1, EXTENT_SIZE, "", 0).expect("1");
-    let err = comp.create_extent(2, EXTENT_SIZE, "", 0);
+    comp.create_extent(1, EXTENT_SIZE).expect("1");
+    let err = comp.create_extent(2, EXTENT_SIZE);
     assert!(matches!(err, Err(ExtentManagerError::OutOfSpace)));
 }
 
 #[test]
 fn not_initialized_errors() {
     let (comp, _mock) = create_test_component();
-    let err = comp.create_extent(1, EXTENT_SIZE, "", 0);
+    let err = comp.create_extent(1, EXTENT_SIZE);
     assert!(matches!(err, Err(ExtentManagerError::NotInitialized(_))));
 
     let err = comp.lookup_extent(1);
@@ -150,9 +150,9 @@ fn not_initialized_errors() {
 #[test]
 fn dynamic_slab_allocation() {
     let (comp, _mock) = setup();
-    comp.create_extent(1, 131072, "", 0).expect("128K class");
-    comp.create_extent(2, 262144, "", 0).expect("256K class");
-    comp.create_extent(3, 524288, "", 0).expect("512K class");
+    comp.create_extent(1, 131072).expect("128K class");
+    comp.create_extent(2, 262144).expect("256K class");
+    comp.create_extent(3, 524288).expect("512K class");
 }
 
 #[test]
@@ -161,12 +161,12 @@ fn multi_slab_same_class() {
     comp.initialize(100 * 4096, 4 * 4096).expect("init");
 
     // Fill first slab (3 slots)
-    comp.create_extent(1, EXTENT_SIZE, "", 0).expect("1");
-    comp.create_extent(2, EXTENT_SIZE, "", 0).expect("2");
-    comp.create_extent(3, EXTENT_SIZE, "", 0).expect("3");
+    comp.create_extent(1, EXTENT_SIZE).expect("1");
+    comp.create_extent(2, EXTENT_SIZE).expect("2");
+    comp.create_extent(3, EXTENT_SIZE).expect("3");
 
     // Triggers second slab allocation for the same class
-    comp.create_extent(4, EXTENT_SIZE, "", 0).expect("4");
+    comp.create_extent(4, EXTENT_SIZE).expect("4");
 }
 
 #[test]
@@ -179,7 +179,7 @@ fn get_extents_empty() {
 fn get_extents_returns_all() {
     let (comp, _mock) = setup();
     for i in 1..=5u64 {
-        comp.create_extent(i, EXTENT_SIZE, "", 0).expect("create");
+        comp.create_extent(i, EXTENT_SIZE).expect("create");
     }
 
     let extents = comp.get_extents();
@@ -194,7 +194,7 @@ fn get_extents_returns_all() {
 fn get_extents_reflects_removals() {
     let (comp, _mock) = setup();
     for i in 1..=3u64 {
-        comp.create_extent(i, EXTENT_SIZE, "", 0).expect("create");
+        comp.create_extent(i, EXTENT_SIZE).expect("create");
     }
     comp.remove_extent(2).expect("remove");
 

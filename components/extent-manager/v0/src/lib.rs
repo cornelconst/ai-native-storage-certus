@@ -20,7 +20,7 @@ use crate::metadata::{ExtentMetadata, OnDiskExtentRecord, BLOCK_SIZE};
 use crate::state::{ExtentManagerState, PoolState};
 
 define_component! {
-    pub ExtentManagerComponentV1 {
+    pub ExtentManagerComponentV0 {
         version: "0.1.0",
         provides: [IExtentManager],
         receptacles: {
@@ -34,10 +34,10 @@ define_component! {
     }
 }
 
-impl ExtentManagerComponentV1 {
+impl ExtentManagerComponentV0 {
     #[allow(dead_code)]
     pub(crate) fn new_inner() -> std::sync::Arc<Self> {
-        ExtentManagerComponentV1::new_default()
+        ExtentManagerComponentV0::new_default()
     }
 
     fn log_info(&self, msg: &str) {
@@ -103,7 +103,7 @@ impl ExtentManagerComponentV1 {
     }
 }
 
-impl IExtentManager for ExtentManagerComponentV1 {
+impl IExtentManager for ExtentManagerComponentV0 {
     fn set_dma_alloc(&self, alloc: DmaAllocFn) {
         *self.dma_alloc.lock().unwrap() = Some(alloc);
     }
@@ -151,8 +151,6 @@ impl IExtentManager for ExtentManagerComponentV1 {
         &self,
         key: u64,
         extent_size: u32,
-        filename: &str,
-        data_crc: u32,
     ) -> Result<Extent, ExtentManagerError> {
         let mut state = self.state.write().unwrap();
 
@@ -182,18 +180,10 @@ impl IExtentManager for ExtentManagerComponentV1 {
         let slab = &pool.slabs[slab_idx];
         let offset_lba = slab.record_start_lba + slot as u64;
 
-        let fname = if filename.is_empty() {
-            None
-        } else {
-            Some(filename.to_string())
-        };
-
         let meta = ExtentMetadata {
             key,
             size_class: extent_size,
             offset_lba,
-            filename: fname,
-            data_crc: Some(data_crc),
             slab_index: slab_idx,
         };
 

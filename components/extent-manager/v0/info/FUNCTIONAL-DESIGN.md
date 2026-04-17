@@ -2,7 +2,7 @@
 
 Component must use the component-framework as the basis for defining interfaces and receptacles etc.
 
-Component is called ExtentManagerComponentV1.  It exports an interface named IExtentManager and also receptacles for IBlockDevice and ILogger.
+Component is called ExtentManagerComponentV0.  It exports an interface named IExtentManager and also receptacles for IBlockDevice and ILogger.
 
 Console logging for the component is through ILogger receptacle.
 
