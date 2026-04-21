@@ -32,7 +32,7 @@ use component_macros::define_component;
 use crate::block_io::BlockDeviceClient;
 use crate::buddy::BuddyAllocator;
 use crate::region::{RegionState, SharedState};
-use crate::superblock::{Superblock, SUPERBLOCK_SIZE};
+use crate::superblock::Superblock;
 
 define_component! {
     pub MetadataManagerV2 {
@@ -246,20 +246,35 @@ impl IExtentManagerV2 for MetadataManagerV2 {
         let disk_size = bd.num_sectors(1).map_err(error::nvme_to_em)?
             * bd.sector_size(1).map_err(error::nvme_to_em)? as u64;
 
-        let usable_size = disk_size - SUPERBLOCK_SIZE as u64;
         let region_count = params.region_count as usize;
-        let region_bytes = usable_size / region_count as u64;
+        let region_bytes = disk_size / region_count as u64;
 
         let mut region_vec = Vec::with_capacity(region_count);
         for i in 0..region_count {
-            let base = SUPERBLOCK_SIZE as u64 + i as u64 * region_bytes;
+            let base = i as u64 * region_bytes;
             let size = if i < region_count - 1 {
                 region_bytes
             } else {
-                usable_size - (region_count as u64 - 1) * region_bytes
+                disk_size - (region_count as u64 - 1) * region_bytes
             };
-            let buddy = BuddyAllocator::new(base, size, params.block_size);
-            region_vec.push(Arc::new(RwLock::new(RegionState::new(i, buddy))));
+            let mut buddy = BuddyAllocator::new(base, size, params.block_size);
+
+            let metadata_offset = buddy
+                .alloc(params.slab_size as u64)
+                .ok_or_else(error::out_of_space)?;
+
+            let mut region = RegionState::new(i, buddy);
+            let metadata_slab =
+                crate::slab::Slab::new(metadata_offset, params.slab_size, params.chunk_size);
+            let slab_idx = region.slabs.len();
+            region.slabs.push(metadata_slab);
+            region.size_classes.add_slab(params.chunk_size, slab_idx);
+
+            if i == 0 {
+                region.slabs[slab_idx].mark_slot_allocated(0);
+            }
+
+            region_vec.push(Arc::new(RwLock::new(region)));
         }
 
         let sb = Superblock::new(
@@ -295,17 +310,16 @@ impl IExtentManagerV2 for MetadataManagerV2 {
         let client = self.get_client()?;
         let (sb, per_region_data) = recovery::recover(&client, self)?;
 
-        let usable_size = sb.disk_size - SUPERBLOCK_SIZE as u64;
         let region_count = sb.region_count as usize;
-        let region_bytes = usable_size / region_count as u64;
+        let region_bytes = sb.disk_size / region_count as u64;
 
         let mut region_vec = Vec::with_capacity(region_count);
         for i in 0..region_count {
-            let base = SUPERBLOCK_SIZE as u64 + i as u64 * region_bytes;
+            let base = i as u64 * region_bytes;
             let size = if i < region_count - 1 {
                 region_bytes
             } else {
-                usable_size - (region_count as u64 - 1) * region_bytes
+                sb.disk_size - (region_count as u64 - 1) * region_bytes
             };
             let mut buddy = BuddyAllocator::new(base, size, sb.block_size);
 
@@ -339,6 +353,15 @@ impl IExtentManagerV2 for MetadataManagerV2 {
                             slab.mark_slot_allocated(slot_idx);
                             break;
                         }
+                    }
+                }
+            }
+
+            if i == 0 {
+                for slab in slabs.iter_mut() {
+                    if let Some(slot_idx) = slab.slot_for_offset(0) {
+                        slab.mark_slot_allocated(slot_idx);
+                        break;
                     }
                 }
             }

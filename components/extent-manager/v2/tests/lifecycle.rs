@@ -113,8 +113,9 @@ fn out_of_space() {
     .expect("format");
 
     let slots_per_slab = SLAB_SIZE / BLOCK_SIZE;
+    let available = slots_per_slab - 1; // slot 0 reserved for superblock
     let mut handles = Vec::new();
-    for i in 0..slots_per_slab as u64 {
+    for i in 0..available as u64 {
         handles.push(c.reserve_extent(i, BLOCK_SIZE).expect("reserve"));
     }
 
