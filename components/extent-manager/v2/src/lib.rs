@@ -17,7 +17,7 @@ pub(crate) mod superblock;
 pub mod test_support;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use parking_lot::RwLock;
@@ -34,6 +34,12 @@ use crate::buddy::BuddyAllocator;
 use crate::region::{RegionState, SharedState};
 use crate::superblock::Superblock;
 
+#[derive(Default)]
+struct CheckpointCoalesce {
+    completed_seq: u64,
+    in_progress: bool,
+}
+
 define_component! {
     pub MetadataManagerV2 {
         version: "0.2.0",
@@ -45,7 +51,8 @@ define_component! {
         fields: {
             regions: RwLock<Option<Vec<Arc<RwLock<RegionState>>>>>,
             shared: Mutex<Option<SharedState>>,
-            checkpoint_mutex: Mutex<()>,
+            checkpoint_coalesce: Mutex<CheckpointCoalesce>,
+            checkpoint_done: Condvar,
             dma_alloc: Mutex<Option<DmaAllocFn>>,
             checkpoint_interval_ms: AtomicU64,
             shutdown: Arc<AtomicBool>,
@@ -121,6 +128,46 @@ impl MetadataManagerV2 {
         if let Ok(logger) = self.logger.get() {
             logger.warn(msg);
         }
+    }
+
+    fn run_checkpoint(&self) -> Result<(), ExtentManagerError> {
+        let any_dirty = {
+            let regions = self.regions.read();
+            let regions = regions
+                .as_ref()
+                .ok_or_else(|| error::not_initialized("component not initialized"))?;
+            regions.iter().any(|r| r.read().dirty)
+        };
+
+        if !any_dirty {
+            return Ok(());
+        }
+
+        self.log_info("checkpoint_start");
+
+        let client = self.get_client()?;
+
+        checkpoint::write_checkpoint(&client, &self.regions, &self.shared)?;
+
+        {
+            let shared = self.shared.lock().unwrap();
+            let shared = shared.as_ref().unwrap();
+            let sb_data = shared.superblock.serialize();
+            client.write_blocks(0, &sb_data)?;
+        }
+
+        {
+            let regions = self.regions.read();
+            if let Some(regions) = regions.as_ref() {
+                for region in regions {
+                    region.write().dirty = false;
+                }
+            }
+        }
+
+        self.log_info("checkpoint_complete");
+
+        Ok(())
     }
 
     fn start_background_checkpoint(self: &Arc<Self>) {
@@ -487,44 +534,36 @@ impl IExtentManagerV2 for MetadataManagerV2 {
     }
 
     fn checkpoint(&self) -> Result<(), ExtentManagerError> {
-        let _guard = self.checkpoint_mutex.lock().unwrap();
-
-        let any_dirty = {
-            let regions = self.regions.read();
-            let regions = regions
-                .as_ref()
-                .ok_or_else(|| error::not_initialized("component not initialized"))?;
-            regions.iter().any(|r| r.read().dirty)
+        let mut state = self.checkpoint_coalesce.lock().unwrap();
+        let needed = if state.in_progress {
+            state.completed_seq + 2
+        } else {
+            state.completed_seq + 1
         };
 
-        if !any_dirty {
-            return Ok(());
-        }
-
-        self.log_info("checkpoint_start");
-
-        let client = self.get_client()?;
-
-        checkpoint::write_checkpoint(&client, &self.regions, &self.shared)?;
-
-        {
-            let shared = self.shared.lock().unwrap();
-            let shared = shared.as_ref().unwrap();
-            let sb_data = shared.superblock.serialize();
-            client.write_blocks(0, &sb_data)?;
-        }
-
-        {
-            let regions = self.regions.read();
-            if let Some(regions) = regions.as_ref() {
-                for region in regions {
-                    region.write().dirty = false;
-                }
+        loop {
+            if state.completed_seq >= needed {
+                return Ok(());
             }
+            if !state.in_progress {
+                break;
+            }
+            state = self.checkpoint_done.wait(state).unwrap();
         }
 
-        self.log_info("checkpoint_complete");
+        state.in_progress = true;
+        drop(state);
 
-        Ok(())
+        let result = self.run_checkpoint();
+
+        let mut state = self.checkpoint_coalesce.lock().unwrap();
+        if result.is_ok() {
+            state.completed_seq = needed;
+        }
+        state.in_progress = false;
+        self.checkpoint_done.notify_all();
+        drop(state);
+
+        result
     }
 }
