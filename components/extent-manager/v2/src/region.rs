@@ -14,6 +14,7 @@ pub(crate) struct RegionState {
     pub size_classes: SizeClassManager,
     pub buddy: BuddyAllocator,
     pub dirty: bool,
+    pub format_params: FormatParams,
 }
 
 pub(crate) struct SharedState {
@@ -24,7 +25,7 @@ pub(crate) struct SharedState {
 }
 
 impl RegionState {
-    pub fn new(region_index: usize, buddy: BuddyAllocator) -> Self {
+    pub fn new(region_index: usize, buddy: BuddyAllocator, format_params: FormatParams) -> Self {
         Self {
             region_index,
             index: HashMap::new(),
@@ -32,6 +33,7 @@ impl RegionState {
             size_classes: SizeClassManager::new(),
             buddy,
             dirty: false,
+            format_params,
         }
     }
 
@@ -42,9 +44,8 @@ impl RegionState {
     pub fn alloc_extent(
         &mut self,
         size: u32,
-        format_params: &FormatParams,
     ) -> Result<(usize, usize, u64), ExtentManagerError> {
-        let element_size = self.align_to_block_size(size, format_params.block_size);
+        let element_size = self.align_to_block_size(size, self.format_params.block_size);
 
         for &slab_idx in self.size_classes.get_slabs(element_size) {
             if let Some((slot_idx, offset)) = self.slabs[slab_idx].alloc_slot() {
@@ -52,12 +53,13 @@ impl RegionState {
             }
         }
 
+        let slab_size = self.format_params.slab_size;
         let disk_offset = self
             .buddy
-            .alloc(format_params.slab_size as u64)
+            .alloc(slab_size as u64)
             .ok_or_else(error::out_of_space)?;
 
-        let slab = Slab::new(disk_offset, format_params.slab_size, element_size);
+        let slab = Slab::new(disk_offset, slab_size, element_size);
         let slab_idx = self.slabs.len();
         self.slabs.push(slab);
         self.size_classes.add_slab(element_size, slab_idx);
@@ -69,7 +71,7 @@ impl RegionState {
         Ok((slab_idx, slot_idx, offset))
     }
 
-    pub fn free_slot(&mut self, slab_idx: usize, slot_idx: usize, slab_size: u32) {
+    pub fn free_slot(&mut self, slab_idx: usize, slot_idx: usize) {
         let slab = &mut self.slabs[slab_idx];
         slab.free_slot(slot_idx);
 
@@ -77,7 +79,7 @@ impl RegionState {
             let disk_offset = slab.start_offset;
             let element_size = slab.element_size;
 
-            self.buddy.free(disk_offset, slab_size as u64);
+            self.buddy.free(disk_offset, self.format_params.slab_size as u64);
             self.size_classes.remove_slab(element_size, slab_idx);
 
             if slab_idx < self.slabs.len() - 1 {
@@ -105,14 +107,13 @@ impl RegionState {
     pub fn remove_extent(
         &mut self,
         key: ExtentKey,
-        block_size: u32,
     ) -> Result<(usize, usize), ExtentManagerError> {
         let extent = self
             .index
             .remove(&key)
             .ok_or_else(|| error::key_not_found(key))?;
 
-        let aligned_size = self.align_to_block_size(extent.size, block_size);
+        let aligned_size = self.align_to_block_size(extent.size, self.format_params.block_size);
         for (slab_idx, slab) in self.slabs.iter().enumerate() {
             if slab.element_size == aligned_size {
                 if let Some(slot_idx) = slab.slot_for_offset(extent.offset) {

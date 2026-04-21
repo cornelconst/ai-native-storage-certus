@@ -130,14 +130,10 @@ pub(crate) fn write_checkpoint(
         .as_ref()
         .ok_or_else(|| error::not_initialized("component not initialized"))?;
 
-    let chunk_size;
-    let block_size;
-    {
-        let shared = shared_mutex.lock().unwrap();
-        let s = shared.as_ref().ok_or_else(|| error::not_initialized("no shared state"))?;
-        chunk_size = s.format_params.chunk_size;
-        block_size = s.format_params.block_size;
-    }
+    let (chunk_size, block_size) = {
+        let r = regions[0].read();
+        (r.format_params.chunk_size, r.format_params.block_size)
+    };
 
     let max_payload = chunk_size as usize - CHUNK_HEADER_SIZE;
     let region_count = regions.len();
@@ -440,8 +436,17 @@ mod tests {
     fn serialize_deserialize_regions() {
         use crate::buddy::BuddyAllocator;
         use crate::region::RegionState;
+        use interfaces::FormatParams;
 
-        let mut r0 = RegionState::new(0, BuddyAllocator::new(4096, 1024 * 1024, 4096));
+        let fp = FormatParams {
+            slab_size: 1024 * 1024,
+            max_element_size: 65536,
+            chunk_size: 131072,
+            block_size: 4096,
+            region_count: 2,
+        };
+
+        let mut r0 = RegionState::new(0, BuddyAllocator::new(4096, 1024 * 1024, 4096), fp.clone());
         r0.index.insert(
             42,
             Extent {
@@ -451,7 +456,7 @@ mod tests {
             },
         );
 
-        let mut r1 = RegionState::new(1, BuddyAllocator::new(4096 + 1024 * 1024, 1024 * 1024, 4096));
+        let mut r1 = RegionState::new(1, BuddyAllocator::new(4096 + 1024 * 1024, 1024 * 1024, 4096), fp);
         r1.index.insert(
             99,
             Extent {

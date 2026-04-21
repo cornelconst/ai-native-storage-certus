@@ -105,17 +105,6 @@ impl MetadataManagerV2 {
         Ok(Arc::clone(&regions[idx]))
     }
 
-    fn with_shared<F, R>(&self, f: F) -> Result<R, ExtentManagerError>
-    where
-        F: FnOnce(&SharedState) -> Result<R, ExtentManagerError>,
-    {
-        let shared = self.shared.lock().unwrap();
-        let s = shared
-            .as_ref()
-            .ok_or_else(|| error::not_initialized("component not initialized"))?;
-        f(s)
-    }
-
     fn log_info(&self, msg: &str) {
         if let Ok(logger) = self.logger.get() {
             logger.info(msg);
@@ -263,7 +252,7 @@ impl IExtentManagerV2 for MetadataManagerV2 {
                 .alloc(params.slab_size as u64)
                 .ok_or_else(error::out_of_space)?;
 
-            let mut region = RegionState::new(i, buddy);
+            let mut region = RegionState::new(i, buddy, params.clone());
             let metadata_slab =
                 crate::slab::Slab::new(metadata_offset, params.slab_size, params.chunk_size);
             let slab_idx = region.slabs.len();
@@ -309,6 +298,14 @@ impl IExtentManagerV2 for MetadataManagerV2 {
 
         let client = self.get_client()?;
         let (sb, per_region_data) = recovery::recover(&client, self)?;
+
+        let format_params = FormatParams {
+            slab_size: sb.slab_size,
+            max_element_size: sb.max_element_size,
+            chunk_size: sb.chunk_size,
+            block_size: sb.block_size,
+            region_count: sb.region_count,
+        };
 
         let region_count = sb.region_count as usize;
         let region_bytes = sb.disk_size / region_count as u64;
@@ -366,7 +363,7 @@ impl IExtentManagerV2 for MetadataManagerV2 {
                 }
             }
 
-            let mut region = RegionState::new(i, buddy);
+            let mut region = RegionState::new(i, buddy, format_params.clone());
             region.index = index;
             region.slabs = slabs;
             region.size_classes = size_classes;
@@ -385,14 +382,6 @@ impl IExtentManagerV2 for MetadataManagerV2 {
                 );
             }
         }
-
-        let format_params = FormatParams {
-            slab_size: sb.slab_size,
-            max_element_size: sb.max_element_size,
-            chunk_size: sb.chunk_size,
-            block_size: sb.block_size,
-            region_count: sb.region_count,
-        };
 
         let shared = SharedState {
             format_params,
@@ -415,25 +404,22 @@ impl IExtentManagerV2 for MetadataManagerV2 {
         size: u32,
     ) -> Result<WriteHandle, ExtentManagerError> {
         let region = self.region_for_key(key)?;
-        let format_params = self.with_shared(|s| Ok(s.format_params.clone()))?;
 
-        let (slab_idx, slot_idx, offset) = {
+        let (slab_idx, slot_idx, offset, aligned_size) = {
             let mut r = region.write();
-            r.alloc_extent(size, &format_params)?
+            let (si, sli, off) = r.alloc_extent(size)?;
+            let bs = r.format_params.block_size;
+            (si, sli, off, (size + bs - 1) / bs * bs)
         };
-
-        let aligned_size =
-            (size + format_params.block_size - 1) / format_params.block_size * format_params.block_size;
 
         let publish_region = Arc::clone(&region);
         let abort_region = Arc::clone(&region);
-        let slab_size = format_params.slab_size;
 
         let publish_fn = Box::new(move || {
             let mut r = publish_region.write();
 
             if r.index.contains_key(&key) {
-                r.free_slot(slab_idx, slot_idx, slab_size);
+                r.free_slot(slab_idx, slot_idx);
                 return Err(error::duplicate_key(key));
             }
 
@@ -450,7 +436,7 @@ impl IExtentManagerV2 for MetadataManagerV2 {
 
         let abort_fn = Box::new(move || {
             let mut r = abort_region.write();
-            r.free_slot(slab_idx, slot_idx, slab_size);
+            r.free_slot(slab_idx, slot_idx);
         });
 
         Ok(WriteHandle::new(key, offset, aligned_size, publish_fn, abort_fn))
@@ -494,13 +480,9 @@ impl IExtentManagerV2 for MetadataManagerV2 {
 
     fn remove_extent(&self, key: ExtentKey) -> Result<(), ExtentManagerError> {
         let region = self.region_for_key(key)?;
-        let (block_size, slab_size) = self.with_shared(|s| {
-            Ok((s.format_params.block_size, s.format_params.slab_size))
-        })?;
-
         let mut r = region.write();
-        let (slab_idx, slot_idx) = r.remove_extent(key, block_size)?;
-        r.free_slot(slab_idx, slot_idx, slab_size);
+        let (slab_idx, slot_idx) = r.remove_extent(key)?;
+        r.free_slot(slab_idx, slot_idx);
         Ok(())
     }
 
