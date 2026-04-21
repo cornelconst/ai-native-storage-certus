@@ -15,8 +15,8 @@ checkpointing, and recovery for a single block device.
   regions (power-of-two count), each with its own lock, index, buddy allocator,
   and slab allocator
 - **Crash-consistent checkpointing** -- extent metadata is persisted as a
-  linked chain of CRC-protected chunks, with dual-chain rotation so one valid
-  checkpoint always survives a crash
+  linked chain of CRC-protected chunks, with dual-chain rotation so the
+  previous checkpoint remains available if media errors corrupt the current one
 - **Checkpoint coalescing** -- concurrent checkpoint requests are coalesced so
   at most two I/O rounds execute instead of N
 
@@ -116,8 +116,10 @@ magic(4) | seq(8) | prev_lba(8) | next_lba(8) | payload_len(4) | checksum(4) | p
 
 The concatenated payload across all chunks encodes every region's extent
 index and slab descriptors. The superblock at LBA 0 stores pointers to
-both the current and previous checkpoint chains, enabling fallback recovery
-if the latest chain is partially written.
+both the current and previous checkpoint chains. Since the superblock
+write is atomic (single block), both pointers are always consistent. The
+previous chain serves as a fallback if media errors make the current
+chain unreadable.
 
 ### Recovery
 
@@ -125,7 +127,7 @@ On `initialize()`, the recovery module:
 
 1. Reads and validates the superblock (magic + CRC)
 2. Follows the current checkpoint chain, verifying per-chunk CRCs
-3. Falls back to the previous chain if the current one is corrupt
+3. Falls back to the previous chain if media errors make the current one unreadable
 4. Rebuilds each region's buddy allocator, slab state, and extent index
    from the recovered data
 
