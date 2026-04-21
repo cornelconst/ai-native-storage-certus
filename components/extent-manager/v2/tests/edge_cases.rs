@@ -14,6 +14,7 @@ fn format_params() -> FormatParams {
         max_element_size: MAX_ELEMENT_SIZE,
         chunk_size: CHUNK_SIZE,
         block_size: BLOCK_SIZE,
+        region_count: 4,
     }
 }
 
@@ -50,6 +51,7 @@ fn out_of_space_returns_error() {
         max_element_size: MAX_ELEMENT_SIZE,
         chunk_size: BLOCK_SIZE,
         block_size: BLOCK_SIZE,
+        region_count: 1,
     })
     .expect("format");
 

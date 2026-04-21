@@ -4,8 +4,8 @@ mod buddy;
 pub(crate) mod checkpoint;
 mod error;
 mod recovery;
+pub(crate) mod region;
 mod slab;
-pub(crate) mod state;
 mod write_handle;
 
 #[cfg(any(test, feature = "testing"))]
@@ -31,21 +31,22 @@ use component_macros::define_component;
 
 use crate::block_io::BlockDeviceClient;
 use crate::buddy::BuddyAllocator;
-use crate::state::ManagerState;
+use crate::region::{RegionState, SharedState};
 use crate::superblock::{Superblock, SUPERBLOCK_SIZE};
 
 define_component! {
     pub MetadataManagerV2 {
-        version: "0.1.0",
+        version: "0.2.0",
         provides: [IExtentManagerV2],
         receptacles: {
             block_device: IBlockDevice,
             logger: ILogger,
         },
         fields: {
-            state: Arc<RwLock<Option<ManagerState>>>,
+            regions: RwLock<Option<Vec<Arc<RwLock<RegionState>>>>>,
+            shared: Mutex<Option<SharedState>>,
+            checkpoint_mutex: Mutex<()>,
             dma_alloc: Mutex<Option<DmaAllocFn>>,
-            superblock: Mutex<Option<Superblock>>,
             checkpoint_interval_ms: AtomicU64,
             shutdown: Arc<AtomicBool>,
             checkpoint_thread: Mutex<Option<JoinHandle<()>>>,
@@ -85,39 +86,32 @@ impl MetadataManagerV2 {
             .ok_or_else(|| error::not_initialized("DMA allocator not set"))?;
 
         let block_size = {
-            let state = self.state.read();
-            match state.as_ref() {
+            let shared = self.shared.lock().unwrap();
+            match shared.as_ref() {
                 Some(s) => s.format_params.block_size,
-                None => {
-                    let sb = self.superblock.lock().unwrap();
-                    sb.as_ref()
-                        .map(|s| s.block_size)
-                        .unwrap_or(4096)
-                }
+                None => 4096,
             }
         };
 
         Ok(BlockDeviceClient::new(channels, alloc, block_size))
     }
 
-    fn with_state<F, R>(&self, f: F) -> Result<R, ExtentManagerError>
-    where
-        F: FnOnce(&ManagerState) -> Result<R, ExtentManagerError>,
-    {
-        let state = self.state.read();
-        let s = state
+    fn region_for_key(&self, key: ExtentKey) -> Result<Arc<RwLock<RegionState>>, ExtentManagerError> {
+        let regions = self.regions.read();
+        let regions = regions
             .as_ref()
             .ok_or_else(|| error::not_initialized("component not initialized"))?;
-        f(s)
+        let idx = key as usize & (regions.len() - 1);
+        Ok(Arc::clone(&regions[idx]))
     }
 
-    fn with_state_mut<F, R>(&self, f: F) -> Result<R, ExtentManagerError>
+    fn with_shared<F, R>(&self, f: F) -> Result<R, ExtentManagerError>
     where
-        F: FnOnce(&mut ManagerState) -> Result<R, ExtentManagerError>,
+        F: FnOnce(&SharedState) -> Result<R, ExtentManagerError>,
     {
-        let mut state = self.state.write();
-        let s = state
-            .as_mut()
+        let shared = self.shared.lock().unwrap();
+        let s = shared
+            .as_ref()
             .ok_or_else(|| error::not_initialized("component not initialized"))?;
         f(s)
     }
@@ -173,17 +167,31 @@ impl Drop for MetadataManagerV2 {
     }
 }
 
+fn find_region_for_offset(regions: &[Arc<RwLock<RegionState>>], byte_offset: u64) -> usize {
+    for (i, region) in regions.iter().enumerate() {
+        let r = region.read();
+        let base = r.buddy.base_offset();
+        let end = base + r.buddy.total_usable_size();
+        if byte_offset >= base && byte_offset < end {
+            return i;
+        }
+    }
+    0
+}
+
 fn mark_chain_allocated(
     client: &BlockDeviceClient,
     head_lba: u64,
     chunk_size: u32,
     block_size: u32,
-    buddy: &mut BuddyAllocator,
+    regions: &[Arc<RwLock<RegionState>>],
 ) {
     let mut current_lba = head_lba;
     while current_lba != 0 {
-        let buddy_offset = current_lba * block_size as u64 - SUPERBLOCK_SIZE as u64;
-        buddy.mark_allocated(buddy_offset, chunk_size as u64);
+        let byte_offset = current_lba * block_size as u64;
+        let region_idx = find_region_for_offset(regions, byte_offset);
+        regions[region_idx].write().buddy.mark_allocated(byte_offset, chunk_size as u64);
+
         let next = client
             .read_blocks(current_lba, chunk_size as usize)
             .ok()
@@ -223,6 +231,11 @@ impl IExtentManagerV2 for MetadataManagerV2 {
                 "chunk_size must be a multiple of block_size",
             ));
         }
+        if params.region_count == 0 || !params.region_count.is_power_of_two() {
+            return Err(error::corrupt_metadata(
+                "region_count must be a power of two",
+            ));
+        }
 
         let client = self.get_client()?;
 
@@ -234,7 +247,20 @@ impl IExtentManagerV2 for MetadataManagerV2 {
             * bd.sector_size(1).map_err(error::nvme_to_em)? as u64;
 
         let usable_size = disk_size - SUPERBLOCK_SIZE as u64;
-        let buddy = BuddyAllocator::new(usable_size, params.block_size);
+        let region_count = params.region_count as usize;
+        let region_bytes = usable_size / region_count as u64;
+
+        let mut region_vec = Vec::with_capacity(region_count);
+        for i in 0..region_count {
+            let base = SUPERBLOCK_SIZE as u64 + i as u64 * region_bytes;
+            let size = if i < region_count - 1 {
+                region_bytes
+            } else {
+                usable_size - (region_count as u64 - 1) * region_bytes
+            };
+            let buddy = BuddyAllocator::new(base, size, params.block_size);
+            region_vec.push(Arc::new(RwLock::new(RegionState::new(i, buddy))));
+        }
 
         let sb = Superblock::new(
             disk_size,
@@ -242,14 +268,21 @@ impl IExtentManagerV2 for MetadataManagerV2 {
             params.slab_size,
             params.max_element_size,
             params.chunk_size,
+            params.region_count,
         );
 
         let sb_data = sb.serialize();
         client.write_blocks(0, &sb_data)?;
 
-        let state = ManagerState::new(buddy, params, 0);
-        *self.state.write() = Some(state);
-        *self.superblock.lock().unwrap() = Some(sb);
+        let shared = SharedState {
+            format_params: params,
+            checkpoint_seq: 0,
+            disk_size,
+            superblock: sb,
+        };
+
+        *self.regions.write() = Some(region_vec);
+        *self.shared.lock().unwrap() = Some(shared);
 
         self.log_info("format complete");
 
@@ -260,39 +293,62 @@ impl IExtentManagerV2 for MetadataManagerV2 {
         self.log_info("recovery_start");
 
         let client = self.get_client()?;
-        let (sb, index, slab_descriptors) = recovery::recover(&client, self)?;
+        let (sb, per_region_data) = recovery::recover(&client, self)?;
 
         let usable_size = sb.disk_size - SUPERBLOCK_SIZE as u64;
-        let mut buddy = BuddyAllocator::new(usable_size, sb.block_size);
+        let region_count = sb.region_count as usize;
+        let region_bytes = usable_size / region_count as u64;
 
-        let mut slabs = Vec::new();
-        let mut size_classes = crate::slab::SizeClassManager::new();
+        let mut region_vec = Vec::with_capacity(region_count);
+        for i in 0..region_count {
+            let base = SUPERBLOCK_SIZE as u64 + i as u64 * region_bytes;
+            let size = if i < region_count - 1 {
+                region_bytes
+            } else {
+                usable_size - (region_count as u64 - 1) * region_bytes
+            };
+            let mut buddy = BuddyAllocator::new(base, size, sb.block_size);
 
-        for desc in &slab_descriptors {
-            let slab = crate::slab::Slab::new(
-                desc.start_offset,
-                desc.slab_size,
-                desc.element_size,
-            );
-            let slab_idx = slabs.len();
-            size_classes.add_slab(desc.element_size, slab_idx);
-            let buddy_offset = desc.start_offset - SUPERBLOCK_SIZE as u64;
-            buddy.mark_allocated(buddy_offset, desc.slab_size as u64);
-            slabs.push(slab);
-        }
+            let (index, slab_descriptors) = if i < per_region_data.len() {
+                per_region_data[i].clone()
+            } else {
+                (std::collections::HashMap::new(), Vec::new())
+            };
 
-        let block_size = sb.block_size;
-        for extent in index.values() {
-            let aligned_size =
-                (extent.size + block_size - 1) / block_size * block_size;
-            for slab in slabs.iter_mut() {
-                if slab.element_size == aligned_size {
-                    if let Some(slot_idx) = slab.slot_for_offset(extent.offset) {
-                        slab.mark_slot_allocated(slot_idx);
-                        break;
+            let mut slabs = Vec::new();
+            let mut size_classes = crate::slab::SizeClassManager::new();
+
+            for desc in &slab_descriptors {
+                let slab = crate::slab::Slab::new(
+                    desc.start_offset,
+                    desc.slab_size,
+                    desc.element_size,
+                );
+                let slab_idx = slabs.len();
+                size_classes.add_slab(desc.element_size, slab_idx);
+                buddy.mark_allocated(desc.start_offset, desc.slab_size as u64);
+                slabs.push(slab);
+            }
+
+            for extent in index.values() {
+                let aligned_size =
+                    (extent.size + sb.block_size - 1) / sb.block_size * sb.block_size;
+                for slab in slabs.iter_mut() {
+                    if slab.element_size == aligned_size {
+                        if let Some(slot_idx) = slab.slot_for_offset(extent.offset) {
+                            slab.mark_slot_allocated(slot_idx);
+                            break;
+                        }
                     }
                 }
             }
+
+            let mut region = RegionState::new(i, buddy);
+            region.index = index;
+            region.slabs = slabs;
+            region.size_classes = size_classes;
+
+            region_vec.push(Arc::new(RwLock::new(region)));
         }
 
         for &chain_lba in &[sb.current_index_lba, sb.previous_index_lba] {
@@ -302,7 +358,7 @@ impl IExtentManagerV2 for MetadataManagerV2 {
                     chain_lba,
                     sb.chunk_size,
                     sb.block_size,
-                    &mut buddy,
+                    &region_vec,
                 );
             }
         }
@@ -312,15 +368,18 @@ impl IExtentManagerV2 for MetadataManagerV2 {
             max_element_size: sb.max_element_size,
             chunk_size: sb.chunk_size,
             block_size: sb.block_size,
+            region_count: sb.region_count,
         };
 
-        let mut state = ManagerState::new(buddy, format_params, sb.checkpoint_seq);
-        state.index = index;
-        state.slabs = slabs;
-        state.size_classes = size_classes;
+        let shared = SharedState {
+            format_params,
+            checkpoint_seq: sb.checkpoint_seq,
+            disk_size: sb.disk_size,
+            superblock: sb,
+        };
 
-        *self.state.write() = Some(state);
-        *self.superblock.lock().unwrap() = Some(sb);
+        *self.regions.write() = Some(region_vec);
+        *self.shared.lock().unwrap() = Some(shared);
 
         self.log_info("recovery_complete");
 
@@ -332,27 +391,26 @@ impl IExtentManagerV2 for MetadataManagerV2 {
         key: ExtentKey,
         size: u32,
     ) -> Result<WriteHandle, ExtentManagerError> {
-        let (slab_idx, slot_idx, offset) = self.with_state_mut(|state| {
-            state.alloc_extent(size)
-        })?;
+        let region = self.region_for_key(key)?;
+        let format_params = self.with_shared(|s| Ok(s.format_params.clone()))?;
 
-        let aligned_size = {
-            let state = self.state.read();
-            let s = state.as_ref().unwrap();
-            (size + s.format_params.block_size - 1)
-                / s.format_params.block_size
-                * s.format_params.block_size
+        let (slab_idx, slot_idx, offset) = {
+            let mut r = region.write();
+            r.alloc_extent(size, &format_params)?
         };
 
-        let state_ref = Arc::clone(&self.state);
-        let publish_state = Arc::clone(&self.state);
+        let aligned_size =
+            (size + format_params.block_size - 1) / format_params.block_size * format_params.block_size;
+
+        let publish_region = Arc::clone(&region);
+        let abort_region = Arc::clone(&region);
+        let slab_size = format_params.slab_size;
 
         let publish_fn = Box::new(move || {
-            let mut state = publish_state.write();
-            let s = state.as_mut().unwrap();
+            let mut r = publish_region.write();
 
-            if s.index.contains_key(&key) {
-                s.free_slot(slab_idx, slot_idx);
+            if r.index.contains_key(&key) {
+                r.free_slot(slab_idx, slot_idx, slab_size);
                 return Err(error::duplicate_key(key));
             }
 
@@ -362,59 +420,79 @@ impl IExtentManagerV2 for MetadataManagerV2 {
                 size: aligned_size,
             };
 
-            s.index.insert(key, extent.clone());
-            s.dirty = true;
+            r.index.insert(key, extent.clone());
+            r.dirty = true;
             Ok(extent)
         });
 
         let abort_fn = Box::new(move || {
-            let mut state = state_ref.write();
-            if let Some(s) = state.as_mut() {
-                s.free_slot(slab_idx, slot_idx);
-            }
+            let mut r = abort_region.write();
+            r.free_slot(slab_idx, slot_idx, slab_size);
         });
 
         Ok(WriteHandle::new(key, offset, aligned_size, publish_fn, abort_fn))
     }
 
     fn lookup_extent(&self, key: ExtentKey) -> Result<Extent, ExtentManagerError> {
-        self.with_state(|state| {
-            state
-                .index
-                .get(&key)
-                .cloned()
-                .ok_or_else(|| error::key_not_found(key))
-        })
+        let region = self.region_for_key(key)?;
+        let r = region.read();
+        r.index
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| error::key_not_found(key))
     }
 
     fn get_extents(&self) -> Vec<Extent> {
-        let state = self.state.read();
-        match state.as_ref() {
-            Some(s) => s.index.values().cloned().collect(),
+        let regions = self.regions.read();
+        match regions.as_ref() {
+            Some(regions) => {
+                let mut result = Vec::new();
+                for region in regions {
+                    let r = region.read();
+                    result.extend(r.index.values().cloned());
+                }
+                result
+            }
             None => Vec::new(),
         }
     }
 
     fn for_each_extent(&self, cb: &mut dyn FnMut(&Extent)) {
-        let state = self.state.read();
-        if let Some(s) = state.as_ref() {
-            for extent in s.index.values() {
-                cb(extent);
+        let regions = self.regions.read();
+        if let Some(regions) = regions.as_ref() {
+            for region in regions {
+                let r = region.read();
+                for extent in r.index.values() {
+                    cb(extent);
+                }
             }
         }
     }
 
     fn remove_extent(&self, key: ExtentKey) -> Result<(), ExtentManagerError> {
-        self.with_state_mut(|state| {
-            let (slab_idx, slot_idx) = state.remove_extent(key)?;
-            state.free_slot(slab_idx, slot_idx);
-            Ok(())
-        })
+        let region = self.region_for_key(key)?;
+        let (block_size, slab_size) = self.with_shared(|s| {
+            Ok((s.format_params.block_size, s.format_params.slab_size))
+        })?;
+
+        let mut r = region.write();
+        let (slab_idx, slot_idx) = r.remove_extent(key, block_size)?;
+        r.free_slot(slab_idx, slot_idx, slab_size);
+        Ok(())
     }
 
     fn checkpoint(&self) -> Result<(), ExtentManagerError> {
-        let is_dirty = self.with_state(|s| Ok(s.dirty))?;
-        if !is_dirty {
+        let _guard = self.checkpoint_mutex.lock().unwrap();
+
+        let any_dirty = {
+            let regions = self.regions.read();
+            let regions = regions
+                .as_ref()
+                .ok_or_else(|| error::not_initialized("component not initialized"))?;
+            regions.iter().any(|r| r.read().dirty)
+        };
+
+        if !any_dirty {
             return Ok(());
         }
 
@@ -422,22 +500,23 @@ impl IExtentManagerV2 for MetadataManagerV2 {
 
         let client = self.get_client()?;
 
+        checkpoint::write_checkpoint(&client, &self.regions, &self.shared)?;
+
         {
-            let mut sb_lock = self.superblock.lock().unwrap();
-            let sb = sb_lock
-                .as_mut()
-                .ok_or_else(|| error::not_initialized("no superblock"))?;
-
-            checkpoint::write_checkpoint(&client, &self.state, sb)?;
-
-            let sb_data = sb.serialize();
+            let shared = self.shared.lock().unwrap();
+            let shared = shared.as_ref().unwrap();
+            let sb_data = shared.superblock.serialize();
             client.write_blocks(0, &sb_data)?;
         }
 
-        self.with_state_mut(|s| {
-            s.dirty = false;
-            Ok(())
-        })?;
+        {
+            let regions = self.regions.read();
+            if let Some(regions) = regions.as_ref() {
+                for region in regions {
+                    region.write().dirty = false;
+                }
+            }
+        }
 
         self.log_info("checkpoint_complete");
 

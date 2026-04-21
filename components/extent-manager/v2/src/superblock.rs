@@ -3,7 +3,7 @@ use interfaces::ExtentManagerError;
 
 pub const SUPERBLOCK_SIZE: usize = 4096;
 pub const SUPERBLOCK_MAGIC: u64 = 0x4345_5254_5553_5632; // "CERTUSV2"
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct Superblock {
@@ -16,6 +16,7 @@ pub struct Superblock {
     pub slab_size: u32,
     pub max_element_size: u32,
     pub chunk_size: u32,
+    pub region_count: u32,
     pub checkpoint_seq: u64,
     pub checksum: u32,
 }
@@ -27,6 +28,7 @@ impl Superblock {
         slab_size: u32,
         max_element_size: u32,
         chunk_size: u32,
+        region_count: u32,
     ) -> Self {
         Self {
             magic: SUPERBLOCK_MAGIC,
@@ -38,6 +40,7 @@ impl Superblock {
             slab_size,
             max_element_size,
             chunk_size,
+            region_count,
             checkpoint_seq: 0,
             checksum: 0,
         }
@@ -67,6 +70,8 @@ impl Superblock {
             .copy_from_slice(&self.max_element_size.to_le_bytes());
         pos += 4;
         buf[pos..pos + 4].copy_from_slice(&self.chunk_size.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.region_count.to_le_bytes());
         pos += 4;
         buf[pos..pos + 8]
             .copy_from_slice(&self.checkpoint_seq.to_le_bytes());
@@ -117,6 +122,9 @@ impl Superblock {
         let chunk_size =
             u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
         pos += 4;
+        let region_count =
+            u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+        pos += 4;
         let checkpoint_seq =
             u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
         pos += 8;
@@ -141,6 +149,7 @@ impl Superblock {
             slab_size,
             max_element_size,
             chunk_size,
+            region_count,
             checkpoint_seq,
             checksum: stored_crc,
         })
@@ -153,7 +162,7 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let sb = Superblock::new(1024 * 1024 * 1024, 4096, 1024 * 1024, 65536, 131072);
+        let sb = Superblock::new(1024 * 1024 * 1024, 4096, 1024 * 1024, 65536, 131072, 32);
         let buf = sb.serialize();
         assert_eq!(buf.len(), SUPERBLOCK_SIZE);
 
@@ -165,12 +174,13 @@ mod tests {
         assert_eq!(recovered.slab_size, 1024 * 1024);
         assert_eq!(recovered.max_element_size, 65536);
         assert_eq!(recovered.chunk_size, 131072);
+        assert_eq!(recovered.region_count, 32);
         assert_eq!(recovered.checkpoint_seq, 0);
     }
 
     #[test]
     fn corrupt_crc_detected() {
-        let sb = Superblock::new(1024 * 1024, 4096, 65536, 4096, 131072);
+        let sb = Superblock::new(1024 * 1024, 4096, 65536, 4096, 131072, 32);
         let mut buf = sb.serialize();
         buf[10] ^= 0xFF;
         let err = Superblock::deserialize(&buf).unwrap_err();
@@ -179,10 +189,9 @@ mod tests {
 
     #[test]
     fn invalid_magic_detected() {
-        let sb = Superblock::new(1024 * 1024, 4096, 65536, 4096, 131072);
+        let sb = Superblock::new(1024 * 1024, 4096, 65536, 4096, 131072, 32);
         let mut buf = sb.serialize();
         buf[0] = 0xFF;
-        // Recompute won't help since magic check is first
         let err = Superblock::deserialize(&buf).unwrap_err();
         assert!(err.to_string().contains("magic"));
     }

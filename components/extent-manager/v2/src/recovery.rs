@@ -7,18 +7,20 @@ use crate::checkpoint::{self, SlabDescriptor};
 use crate::error;
 use crate::superblock::{Superblock, SUPERBLOCK_SIZE};
 
+pub(crate) type PerRegionData = Vec<(HashMap<ExtentKey, Extent>, Vec<SlabDescriptor>)>;
+
 pub(crate) fn recover(
     client: &BlockDeviceClient,
     component: &crate::MetadataManagerV2,
-) -> Result<
-    (Superblock, HashMap<ExtentKey, Extent>, Vec<SlabDescriptor>),
-    ExtentManagerError,
-> {
+) -> Result<(Superblock, PerRegionData), ExtentManagerError> {
     let sb_data = client.read_blocks(0, SUPERBLOCK_SIZE)?;
     let sb = Superblock::deserialize(&sb_data)?;
 
     if sb.current_index_lba == 0 && sb.previous_index_lba == 0 {
-        return Ok((sb, HashMap::new(), Vec::new()));
+        let empty: PerRegionData = (0..sb.region_count as usize)
+            .map(|_| (HashMap::new(), Vec::new()))
+            .collect();
+        return Ok((sb, empty));
     }
 
     if sb.current_index_lba != 0 {
@@ -29,8 +31,8 @@ pub(crate) fn recover(
             sb.chunk_size,
         ) {
             Ok(data) => {
-                let (index, slabs) = checkpoint::deserialize_index_and_slabs(&data)?;
-                return Ok((sb, index, slabs));
+                let regions = checkpoint::deserialize_index_and_slabs(&data)?;
+                return Ok((sb, regions));
             }
             Err(e) => {
                 component.log_warn(&format!(
@@ -49,8 +51,8 @@ pub(crate) fn recover(
             sb.chunk_size,
         ) {
             Ok(data) => {
-                let (index, slabs) = checkpoint::deserialize_index_and_slabs(&data)?;
-                return Ok((sb, index, slabs));
+                let regions = checkpoint::deserialize_index_and_slabs(&data)?;
+                return Ok((sb, regions));
             }
             Err(e) => {
                 component.log_error(&format!(

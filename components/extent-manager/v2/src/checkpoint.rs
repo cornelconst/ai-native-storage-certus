@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use parking_lot::RwLock;
 
@@ -6,14 +6,13 @@ use interfaces::{Extent, ExtentKey, ExtentManagerError};
 
 use crate::block_io::BlockDeviceClient;
 use crate::error;
-use crate::state::ManagerState;
-use crate::superblock::{Superblock, SUPERBLOCK_SIZE};
+use crate::region::{RegionState, SharedState};
 
 pub(crate) const CHUNK_MAGIC: u32 = 0x434B_4E4B; // "CKNK"
 pub(crate) const CHUNK_HEADER_SIZE: usize = 36;
 
 const INDEX_ENTRY_SIZE: usize = 20; // u64 key + u64 offset + u32 size
-const SLAB_ENTRY_SIZE: usize = 16; // u64 start_offset + u32 slab_size + u32 element_size
+const SLAB_ENTRY_SIZE: usize = 16;  // u64 start_offset + u32 slab_size + u32 element_size
 
 #[derive(Debug, Clone)]
 pub(crate) struct ChunkHeader {
@@ -93,160 +92,115 @@ impl ChunkHeader {
     }
 }
 
-pub(crate) fn serialize_index_and_slabs(
-    state: &ManagerState,
-    chunk_size: u32,
-) -> Vec<Vec<u8>> {
-    let max_payload = chunk_size as usize - CHUNK_HEADER_SIZE;
-    let mut all_data = Vec::new();
+fn serialize_region(region: &RegionState) -> Vec<u8> {
+    let mut data = Vec::new();
 
-    let num_entries = state.index.len() as u32;
-    all_data.extend_from_slice(&num_entries.to_le_bytes());
+    let num_entries = region.index.len() as u32;
+    data.extend_from_slice(&num_entries.to_le_bytes());
 
-    for (key, extent) in &state.index {
-        all_data.extend_from_slice(&key.to_le_bytes());
-        all_data.extend_from_slice(&extent.offset.to_le_bytes());
-        all_data.extend_from_slice(&extent.size.to_le_bytes());
+    for (key, extent) in &region.index {
+        data.extend_from_slice(&key.to_le_bytes());
+        data.extend_from_slice(&extent.offset.to_le_bytes());
+        data.extend_from_slice(&extent.size.to_le_bytes());
     }
 
-    let num_slabs = state.slabs.len() as u32;
-    all_data.extend_from_slice(&num_slabs.to_le_bytes());
+    let num_slabs = region.slabs.len() as u32;
+    data.extend_from_slice(&num_slabs.to_le_bytes());
 
-    for slab in &state.slabs {
-        all_data.extend_from_slice(&slab.start_offset.to_le_bytes());
-        all_data.extend_from_slice(&slab.slab_size.to_le_bytes());
-        all_data.extend_from_slice(&slab.element_size.to_le_bytes());
+    for slab in &region.slabs {
+        data.extend_from_slice(&slab.start_offset.to_le_bytes());
+        data.extend_from_slice(&slab.slab_size.to_le_bytes());
+        data.extend_from_slice(&slab.element_size.to_le_bytes());
     }
 
-    let mut chunks = Vec::new();
-    let mut offset = 0;
-    while offset < all_data.len() {
-        let end = (offset + max_payload).min(all_data.len());
-        chunks.push(all_data[offset..end].to_vec());
-        offset = end;
-    }
-
-    if chunks.is_empty() {
-        chunks.push(Vec::new());
-    }
-
-    chunks
+    data
 }
 
-pub(crate) fn deserialize_index_and_slabs(
-    data: &[u8],
-) -> Result<
-    (
-        std::collections::HashMap<ExtentKey, Extent>,
-        Vec<SlabDescriptor>,
-    ),
-    ExtentManagerError,
-> {
-    if data.len() < 4 {
-        return Err(error::corrupt_metadata("checkpoint data too short"));
-    }
-
-    let mut pos = 0;
-
-    let num_entries = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-
-    let mut index = std::collections::HashMap::with_capacity(num_entries);
-    for _ in 0..num_entries {
-        if pos + INDEX_ENTRY_SIZE > data.len() {
-            return Err(error::corrupt_metadata("truncated index entry"));
-        }
-        let key = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-
-        index.insert(key, Extent { key, offset, size });
-    }
-
-    if pos + 4 > data.len() {
-        return Err(error::corrupt_metadata("truncated slab count"));
-    }
-
-    let num_slabs = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
-    pos += 4;
-
-    let mut slabs = Vec::with_capacity(num_slabs);
-    for _ in 0..num_slabs {
-        if pos + SLAB_ENTRY_SIZE > data.len() {
-            return Err(error::corrupt_metadata("truncated slab entry"));
-        }
-        let start_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
-        pos += 8;
-        let slab_size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-        let element_size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
-        pos += 4;
-
-        slabs.push(SlabDescriptor {
-            start_offset,
-            slab_size,
-            element_size,
-        });
-    }
-
-    Ok((index, slabs))
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SlabDescriptor {
-    pub start_offset: u64,
-    pub slab_size: u32,
-    pub element_size: u32,
+fn region_serialized_size(region: &RegionState) -> usize {
+    4 + region.index.len() * INDEX_ENTRY_SIZE + 4 + region.slabs.len() * SLAB_ENTRY_SIZE
 }
 
 pub(crate) fn write_checkpoint(
     client: &BlockDeviceClient,
-    state: &Arc<RwLock<Option<ManagerState>>>,
-    superblock: &mut Superblock,
+    regions_lock: &RwLock<Option<Vec<Arc<RwLock<RegionState>>>>>,
+    shared_mutex: &Mutex<Option<SharedState>>,
 ) -> Result<(), ExtentManagerError> {
+    let regions = regions_lock.read();
+    let regions = regions
+        .as_ref()
+        .ok_or_else(|| error::not_initialized("component not initialized"))?;
+
     let chunk_size;
-    let chunk_lbas: Vec<u64>;
-
+    let block_size;
     {
-        let mut state_write = state.write();
-        let s = state_write
-            .as_mut()
-            .ok_or_else(|| error::not_initialized("component not initialized"))?;
-
+        let shared = shared_mutex.lock().unwrap();
+        let s = shared.as_ref().ok_or_else(|| error::not_initialized("no shared state"))?;
         chunk_size = s.format_params.chunk_size;
-        let payloads = serialize_index_and_slabs(s, chunk_size);
+        block_size = s.format_params.block_size;
+    }
 
-        let mut lbas = Vec::with_capacity(payloads.len());
-        for _ in &payloads {
-            let lba_offset = s
-                .buddy
-                .alloc(chunk_size as u64)
-                .ok_or_else(error::out_of_space)?;
-            let lba = (lba_offset + SUPERBLOCK_SIZE as u64) / client.block_size() as u64;
-            lbas.push(lba);
+    let max_payload = chunk_size as usize - CHUNK_HEADER_SIZE;
+    let region_count = regions.len();
+
+    // Phase 1: Per-region exclusive lock → size + allocate → downgrade → serialize → release
+    let mut all_data = Vec::new();
+    all_data.extend_from_slice(&(region_count as u32).to_le_bytes());
+
+    let mut chunk_lbas: Vec<u64> = Vec::new();
+
+    for region_arc in regions.iter() {
+        let mut region = region_arc.write();
+
+        let needed_bytes = region_serialized_size(&region);
+        let allocated_payload_space = chunk_lbas.len() * max_payload;
+        let remaining_space = allocated_payload_space.saturating_sub(all_data.len());
+
+        if needed_bytes > remaining_space {
+            let deficit = needed_bytes - remaining_space;
+            let new_chunks_needed = (deficit + max_payload - 1) / max_payload;
+
+            for _ in 0..new_chunks_needed {
+                let abs_offset = region
+                    .buddy
+                    .alloc(chunk_size as u64)
+                    .ok_or_else(error::out_of_space)?;
+                let lba = abs_offset / block_size as u64;
+                chunk_lbas.push(lba);
+            }
         }
 
-        chunk_lbas = lbas;
+        let region = parking_lot::RwLockWriteGuard::downgrade(region);
+        let region_data = serialize_region(&region);
+        all_data.extend_from_slice(&region_data);
+        drop(region);
     }
 
-    let payloads;
-    {
-        let state_read = state.read();
-        let s = state_read
-            .as_ref()
-            .ok_or_else(|| error::not_initialized("component not initialized"))?;
-
-        payloads = serialize_index_and_slabs(s, chunk_size);
+    // Ensure we have at least one chunk
+    if chunk_lbas.is_empty() {
+        let region_arc = &regions[regions.len() - 1];
+        let mut region = region_arc.write();
+        let abs_offset = region
+            .buddy
+            .alloc(chunk_size as u64)
+            .ok_or_else(error::out_of_space)?;
+        let lba = abs_offset / block_size as u64;
+        chunk_lbas.push(lba);
     }
 
-    let new_seq = superblock.checkpoint_seq + 1;
+    // Phase 2: Build chunks with headers and write to disk
+    let new_seq = {
+        let shared = shared_mutex.lock().unwrap();
+        let s = shared.as_ref().unwrap();
+        s.checkpoint_seq + 1
+    };
 
-    for (i, payload) in payloads.iter().enumerate() {
+    let mut payload_offset = 0;
+    for (i, &lba) in chunk_lbas.iter().enumerate() {
+        let payload_end = (payload_offset + max_payload).min(all_data.len());
+        let payload = &all_data[payload_offset..payload_end];
+
         let prev_lba = if i == 0 { 0 } else { chunk_lbas[i - 1] };
-        let next_lba = if i + 1 < payloads.len() {
+        let next_lba = if i + 1 < chunk_lbas.len() {
             chunk_lbas[i + 1]
         } else {
             0
@@ -264,37 +218,53 @@ pub(crate) fn write_checkpoint(
         let mut chunk_data = header.serialize(payload);
         chunk_data.resize(chunk_size as usize, 0);
 
-        client.write_blocks(chunk_lbas[i], &chunk_data)?;
+        client.write_blocks(lba, &chunk_data)?;
+        payload_offset = payload_end;
     }
 
-    let old_previous = superblock.previous_index_lba;
-    superblock.previous_index_lba = superblock.current_index_lba;
-    superblock.current_index_lba = chunk_lbas[0];
-    superblock.checkpoint_seq = new_seq;
-
+    // Phase 3: Update superblock and free old chain
+    let old_previous;
     {
-        let mut state_write = state.write();
-        let s = state_write.as_mut().unwrap();
-        s.checkpoint_seq = new_seq;
+        let mut shared = shared_mutex.lock().unwrap();
+        let s = shared.as_mut().unwrap();
 
-        if old_previous != 0 {
-            free_chain_allocations(client, old_previous, chunk_size, s);
-        }
+        old_previous = s.superblock.previous_index_lba;
+        s.superblock.previous_index_lba = s.superblock.current_index_lba;
+        s.superblock.current_index_lba = chunk_lbas[0];
+        s.superblock.checkpoint_seq = new_seq;
+        s.checkpoint_seq = new_seq;
+    }
+
+    if old_previous != 0 {
+        free_chain_allocations(client, old_previous, chunk_size, block_size, regions);
     }
 
     Ok(())
+}
+
+fn find_region_for_offset(regions: &[Arc<RwLock<RegionState>>], byte_offset: u64) -> usize {
+    for (i, region) in regions.iter().enumerate() {
+        let r = region.read();
+        let base = r.buddy.base_offset();
+        let end = base + r.buddy.total_usable_size();
+        if byte_offset >= base && byte_offset < end {
+            return i;
+        }
+    }
+    0
 }
 
 fn free_chain_allocations(
     client: &BlockDeviceClient,
     head_lba: u64,
     chunk_size: u32,
-    state: &mut ManagerState,
+    block_size: u32,
+    regions: &[Arc<RwLock<RegionState>>],
 ) {
     let mut current_lba = head_lba;
     while current_lba != 0 {
-        let buddy_offset =
-            current_lba * client.block_size() as u64 - SUPERBLOCK_SIZE as u64;
+        let byte_offset = current_lba * block_size as u64;
+
         let next = client
             .read_blocks(current_lba, chunk_size as usize)
             .ok()
@@ -306,7 +276,10 @@ fn free_chain_allocations(
                 Some(u64::from_le_bytes(raw[20..28].try_into().ok()?))
             })
             .unwrap_or(0);
-        state.buddy.free(buddy_offset, chunk_size as u64);
+
+        let region_idx = find_region_for_offset(regions, byte_offset);
+        regions[region_idx].write().buddy.free(byte_offset, chunk_size as u64);
+
         current_lba = next;
     }
 }
@@ -336,6 +309,86 @@ pub(crate) fn read_chunk_chain(
     }
 
     Ok(data)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SlabDescriptor {
+    pub start_offset: u64,
+    pub slab_size: u32,
+    pub element_size: u32,
+}
+
+pub(crate) fn deserialize_index_and_slabs(
+    data: &[u8],
+) -> Result<
+    Vec<(
+        std::collections::HashMap<ExtentKey, Extent>,
+        Vec<SlabDescriptor>,
+    )>,
+    ExtentManagerError,
+> {
+    if data.len() < 4 {
+        return Err(error::corrupt_metadata("checkpoint data too short"));
+    }
+
+    let mut pos = 0;
+
+    let region_count = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+    pos += 4;
+
+    let mut result = Vec::with_capacity(region_count);
+
+    for _ in 0..region_count {
+        if pos + 4 > data.len() {
+            return Err(error::corrupt_metadata("truncated region index count"));
+        }
+        let num_entries = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+
+        let mut index = std::collections::HashMap::with_capacity(num_entries);
+        for _ in 0..num_entries {
+            if pos + INDEX_ENTRY_SIZE > data.len() {
+                return Err(error::corrupt_metadata("truncated index entry"));
+            }
+            let key = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            let offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            let size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            pos += 4;
+
+            index.insert(key, Extent { key, offset, size });
+        }
+
+        if pos + 4 > data.len() {
+            return Err(error::corrupt_metadata("truncated slab count"));
+        }
+        let num_slabs = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        pos += 4;
+
+        let mut slabs = Vec::with_capacity(num_slabs);
+        for _ in 0..num_slabs {
+            if pos + SLAB_ENTRY_SIZE > data.len() {
+                return Err(error::corrupt_metadata("truncated slab entry"));
+            }
+            let start_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            let slab_size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            pos += 4;
+            let element_size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+            pos += 4;
+
+            slabs.push(SlabDescriptor {
+                start_offset,
+                slab_size,
+                element_size,
+            });
+        }
+
+        result.push((index, slabs));
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -384,9 +437,12 @@ mod tests {
     }
 
     #[test]
-    fn serialize_deserialize_index() {
-        let mut state = ManagerState::new_for_testing(1024 * 1024, 4096, 65536, 65536);
-        state.index.insert(
+    fn serialize_deserialize_regions() {
+        use crate::buddy::BuddyAllocator;
+        use crate::region::RegionState;
+
+        let mut r0 = RegionState::new(0, BuddyAllocator::new(4096, 1024 * 1024, 4096));
+        r0.index.insert(
             42,
             Extent {
                 key: 42,
@@ -394,7 +450,9 @@ mod tests {
                 size: 4096,
             },
         );
-        state.index.insert(
+
+        let mut r1 = RegionState::new(1, BuddyAllocator::new(4096 + 1024 * 1024, 1024 * 1024, 4096));
+        r1.index.insert(
             99,
             Extent {
                 key: 99,
@@ -403,16 +461,16 @@ mod tests {
             },
         );
 
-        let payloads = serialize_index_and_slabs(&state, 4096);
         let mut all_data = Vec::new();
-        for p in &payloads {
-            all_data.extend_from_slice(p);
-        }
+        all_data.extend_from_slice(&2u32.to_le_bytes()); // region_count
+        all_data.extend_from_slice(&serialize_region(&r0));
+        all_data.extend_from_slice(&serialize_region(&r1));
 
-        let (index, slabs) = deserialize_index_and_slabs(&all_data).unwrap();
-        assert_eq!(index.len(), 2);
-        assert_eq!(index[&42].offset, 8192);
-        assert_eq!(index[&99].offset, 12288);
-        assert_eq!(slabs.len(), 0);
+        let regions = deserialize_index_and_slabs(&all_data).unwrap();
+        assert_eq!(regions.len(), 2);
+        assert_eq!(regions[0].0.len(), 1);
+        assert_eq!(regions[0].0[&42].offset, 8192);
+        assert_eq!(regions[1].0.len(), 1);
+        assert_eq!(regions[1].0[&99].offset, 12288);
     }
 }

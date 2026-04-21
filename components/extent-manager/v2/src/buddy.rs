@@ -1,4 +1,5 @@
 pub(crate) struct BuddyAllocator {
+    base_offset: u64,
     total_usable_size: u64,
     block_size: u32,
     max_order: usize,
@@ -6,7 +7,7 @@ pub(crate) struct BuddyAllocator {
 }
 
 impl BuddyAllocator {
-    pub fn new(total_usable_size: u64, block_size: u32) -> Self {
+    pub fn new(base_offset: u64, total_usable_size: u64, block_size: u32) -> Self {
         let usable_blocks = total_usable_size / block_size as u64;
         let max_order = if usable_blocks > 1 {
             63 - usable_blocks.leading_zeros() as usize
@@ -14,6 +15,7 @@ impl BuddyAllocator {
             0
         } else {
             return Self {
+                base_offset,
                 total_usable_size,
                 block_size,
                 max_order: 0,
@@ -35,11 +37,16 @@ impl BuddyAllocator {
         }
 
         Self {
+            base_offset,
             total_usable_size,
             block_size,
             max_order,
             free_lists,
         }
+    }
+
+    pub fn base_offset(&self) -> u64 {
+        self.base_offset
     }
 
     pub fn alloc(&mut self, size: u64) -> Option<u64> {
@@ -60,18 +67,19 @@ impl BuddyAllocator {
         }
 
         let found_order = found_order?;
-        let offset = self.free_lists[found_order].pop().unwrap();
+        let local_offset = self.free_lists[found_order].pop().unwrap();
 
         for split_order in (order_needed..found_order).rev() {
             let buddy_offset =
-                offset + ((1u64 << split_order) * self.block_size as u64);
+                local_offset + ((1u64 << split_order) * self.block_size as u64);
             self.free_lists[split_order].push(buddy_offset);
         }
 
-        Some(offset)
+        Some(self.base_offset + local_offset)
     }
 
-    pub fn free(&mut self, offset: u64, size: u64) {
+    pub fn free(&mut self, abs_offset: u64, size: u64) {
+        let offset = abs_offset - self.base_offset;
         let blocks = size / self.block_size as u64;
         let mut order = if blocks <= 1 {
             0
@@ -103,7 +111,8 @@ impl BuddyAllocator {
         self.free_lists[order].push(current_offset);
     }
 
-    pub fn mark_allocated(&mut self, offset: u64, size: u64) {
+    pub fn mark_allocated(&mut self, abs_offset: u64, size: u64) {
+        let offset = abs_offset - self.base_offset;
         let blocks = size / self.block_size as u64;
         let target_order = if blocks <= 1 {
             0
@@ -156,6 +165,10 @@ impl BuddyAllocator {
         total
     }
 
+    pub fn total_usable_size(&self) -> u64 {
+        self.total_usable_size
+    }
+
     pub fn block_size(&self) -> u32 {
         self.block_size
     }
@@ -167,20 +180,20 @@ mod tests {
 
     #[test]
     fn power_of_two_size() {
-        let buddy = BuddyAllocator::new(1024 * 1024, 4096);
+        let buddy = BuddyAllocator::new(0,1024 * 1024, 4096);
         assert_eq!(buddy.total_free(), 1024 * 1024);
     }
 
     #[test]
     fn non_power_of_two_size() {
         let total = 5 * 4096u64;
-        let buddy = BuddyAllocator::new(total, 4096);
+        let buddy = BuddyAllocator::new(0,total, 4096);
         assert_eq!(buddy.total_free(), total);
     }
 
     #[test]
     fn alloc_and_free() {
-        let mut buddy = BuddyAllocator::new(16 * 4096, 4096);
+        let mut buddy = BuddyAllocator::new(0,16 * 4096, 4096);
         let total = buddy.total_free();
 
         let a = buddy.alloc(4096).expect("alloc 1 block");
@@ -192,7 +205,7 @@ mod tests {
 
     #[test]
     fn alloc_merges_on_free() {
-        let mut buddy = BuddyAllocator::new(4 * 4096, 4096);
+        let mut buddy = BuddyAllocator::new(0,4 * 4096, 4096);
         let a = buddy.alloc(4096).unwrap();
         let b = buddy.alloc(4096).unwrap();
         buddy.free(a, 4096);
@@ -205,7 +218,7 @@ mod tests {
     #[test]
     fn tail_block_no_merge() {
         let total = 3u64 * 4096;
-        let mut buddy = BuddyAllocator::new(total, 4096);
+        let mut buddy = BuddyAllocator::new(0,total, 4096);
         let a = buddy.alloc(4096).unwrap();
         let b = buddy.alloc(4096).unwrap();
         let c = buddy.alloc(4096).unwrap();
@@ -219,7 +232,7 @@ mod tests {
 
     #[test]
     fn exhaust_and_reclaim() {
-        let mut buddy = BuddyAllocator::new(2 * 4096, 4096);
+        let mut buddy = BuddyAllocator::new(0,2 * 4096, 4096);
         let a = buddy.alloc(4096).unwrap();
         let b = buddy.alloc(4096).unwrap();
         assert!(buddy.alloc(4096).is_none());
@@ -230,13 +243,13 @@ mod tests {
     #[test]
     fn large_non_power_of_two() {
         let total = 100 * 4096u64;
-        let buddy = BuddyAllocator::new(total, 4096);
+        let buddy = BuddyAllocator::new(0,total, 4096);
         assert_eq!(buddy.total_free(), total);
     }
 
     #[test]
     fn mark_allocated_exact() {
-        let mut buddy = BuddyAllocator::new(4 * 4096, 4096);
+        let mut buddy = BuddyAllocator::new(0,4 * 4096, 4096);
         let a = buddy.alloc(4096).unwrap();
         buddy.free(a, 4096);
         buddy.mark_allocated(a, 4096);
@@ -245,7 +258,7 @@ mod tests {
 
     #[test]
     fn mark_allocated_split() {
-        let mut buddy = BuddyAllocator::new(4 * 4096, 4096);
+        let mut buddy = BuddyAllocator::new(0,4 * 4096, 4096);
         buddy.mark_allocated(0, 4096);
         assert_eq!(buddy.total_free(), 3 * 4096);
         let a = buddy.alloc(4096).unwrap();
@@ -254,10 +267,35 @@ mod tests {
 
     #[test]
     fn alloc_larger_block() {
-        let mut buddy = BuddyAllocator::new(8 * 4096, 4096);
+        let mut buddy = BuddyAllocator::new(0, 8 * 4096, 4096);
         let a = buddy.alloc(2 * 4096).unwrap();
         assert_eq!(buddy.total_free(), 6 * 4096);
         buddy.free(a, 2 * 4096);
         assert_eq!(buddy.total_free(), 8 * 4096);
+    }
+
+    #[test]
+    fn base_offset_applied() {
+        let base = 1024 * 1024;
+        let mut buddy = BuddyAllocator::new(base, 4 * 4096, 4096);
+        assert_eq!(buddy.base_offset(), base);
+
+        let a = buddy.alloc(4096).unwrap();
+        assert!(a >= base);
+        assert_eq!(buddy.total_free(), 3 * 4096);
+
+        buddy.free(a, 4096);
+        assert_eq!(buddy.total_free(), 4 * 4096);
+    }
+
+    #[test]
+    fn base_offset_mark_allocated() {
+        let base = 8 * 4096;
+        let mut buddy = BuddyAllocator::new(base, 4 * 4096, 4096);
+        buddy.mark_allocated(base, 4096);
+        assert_eq!(buddy.total_free(), 3 * 4096);
+        let a = buddy.alloc(4096).unwrap();
+        assert_ne!(a, base);
+        assert!(a >= base);
     }
 }

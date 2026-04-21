@@ -18,6 +18,7 @@ fn format_params() -> FormatParams {
         max_element_size: MAX_ELEMENT_SIZE,
         chunk_size: CHUNK_SIZE,
         block_size: BLOCK_SIZE,
+        region_count: 4,
     }
 }
 

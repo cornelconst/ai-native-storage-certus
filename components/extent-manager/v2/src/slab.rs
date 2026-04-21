@@ -96,6 +96,14 @@ impl SizeClassManager {
         }
     }
 
+    pub fn update_slab_index(&mut self, element_size: u32, old_index: usize, new_index: usize) {
+        if let Some(indices) = self.map.get_mut(&element_size) {
+            if let Some(pos) = indices.iter().position(|&i| i == old_index) {
+                indices[pos] = new_index;
+            }
+        }
+    }
+
     pub fn get_slabs(&self, element_size: u32) -> &[usize] {
         self.map
             .get(&element_size)

@@ -9,6 +9,7 @@ pub struct FormatParams {
     pub max_element_size: u32,
     pub chunk_size: u32,
     pub block_size: u32,
+    pub region_count: u32,
 }
 
 pub struct WriteHandle {

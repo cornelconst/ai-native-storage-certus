@@ -21,7 +21,6 @@ mod ispdk_env;
 #[cfg(feature = "spdk")]
 pub mod iblock_device;
 mod iextent_manager;
-mod iextent_manager_v2;
 
 #[cfg(feature = "spdk")]
 pub use spdk_types::DmaAllocFn;
@@ -45,7 +44,3 @@ pub use iextent_manager::ExtentKey;
 pub use iextent_manager::ExtentManagerError;
 #[cfg(feature = "spdk")]
 pub use iextent_manager::IExtentManager;
-
-pub use iextent_manager_v2::{FormatParams, WriteHandle};
-#[cfg(feature = "spdk")]
-pub use iextent_manager_v2::IExtentManagerV2;
