@@ -1,6 +1,7 @@
 ---
 name: component-make-new-actor
 description: Create a new actor component skeleton
+argument-hint: "[component-name, receptacle-names,...]"
 ---
 
 Building the skeleton for component named $0 involves the following steps:
@@ -19,7 +20,7 @@ Building the skeleton for component named $0 involves the following steps:
 
 7. Add recepticals for other interface names specified by other arguments, $1, $2 and so forth.  The receptable must have a corresponding interface defined in src/interfaces.
 
-8. Add a permissions file .claude/settings.json, in the newly created sub-directory, that allows access to the component itself, components/component-framework and any other directories corresponding to components that are listed as receptacles.  We want to avoid given access to other components that are not directly used.
+8. Add a permissions file .claude/settings.json, in the newly created sub-directory, that allows access to the component itself, components/component-framework and any other directories corresponding to components that are listed as receptacles.  We want to avoid giving access to other components that are not directly used.
 
 9. Copy skills, except those named 'component-make-new' or 'component-make-new-factor' from .claude/skills into the new component directory's .claude/skills.
 
