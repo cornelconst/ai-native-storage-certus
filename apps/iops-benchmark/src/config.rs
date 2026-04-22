@@ -86,9 +86,17 @@ pub struct BenchConfig {
     #[arg(long, default_value = "read", value_enum)]
     pub op: OpType,
 
-    /// IO block size in bytes.
-    #[arg(long, default_value_t = 4096)]
-    pub block_size: usize,
+    /// IO block size(s) in bytes. Comma-separated list for mixed-size workloads
+    /// (e.g. --block-size 4096,8192,16384). When multiple sizes are given, each
+    /// IO randomly picks one.
+    #[arg(long = "block-size", value_delimiter = ',', default_value = "4096")]
+    pub block_sizes: Vec<usize>,
+
+    /// Number of IOs to submit as a single batch. When > 1, commands are grouped
+    /// into BatchSubmit messages. Each IO in a batch independently picks a random
+    /// block size.
+    #[arg(long, default_value_t = 1)]
+    pub batch_size: u32,
 
     /// Outstanding IOs per thread.
     #[arg(long, default_value_t = 32)]
@@ -137,14 +145,19 @@ impl BenchConfig {
         max_qd: u32,
         ns_list: &[interfaces::NamespaceInfo],
     ) -> Result<(), String> {
-        if self.block_size == 0 {
-            return Err("block-size must be > 0".into());
+        if self.block_sizes.is_empty() {
+            return Err("block-size must specify at least one size".into());
         }
-        if self.block_size % sector_size as usize != 0 {
-            return Err(format!(
-                "block-size {} is not a multiple of device sector size {}",
-                self.block_size, sector_size
-            ));
+        for &bs in &self.block_sizes {
+            if bs == 0 {
+                return Err("block-size must be > 0".into());
+            }
+            if bs % sector_size as usize != 0 {
+                return Err(format!(
+                    "block-size {} is not a multiple of device sector size {}",
+                    bs, sector_size
+                ));
+            }
         }
         if self.threads < 1 {
             return Err("threads must be >= 1".into());
@@ -155,6 +168,15 @@ impl BenchConfig {
         if self.queue_depth < 1 {
             return Err("queue-depth must be >= 1".into());
         }
+        if self.batch_size < 1 {
+            return Err("batch-size must be >= 1".into());
+        }
+        if self.batch_size > self.queue_depth {
+            return Err(format!(
+                "batch-size {} exceeds queue-depth {}",
+                self.batch_size, self.queue_depth
+            ));
+        }
         if !ns_list.iter().any(|ns| ns.ns_id == self.ns_id) {
             let available: Vec<u32> = ns_list.iter().map(|ns| ns.ns_id).collect();
             return Err(format!(
@@ -164,6 +186,11 @@ impl BenchConfig {
         }
         let _ = max_qd; // Used by clamp_queue_depth
         Ok(())
+    }
+
+    /// Largest block size in the configured set.
+    pub fn max_block_size(&self) -> usize {
+        *self.block_sizes.iter().max().unwrap()
     }
 
     /// Clamp queue depth to device maximum, printing a warning if clamped.
@@ -195,7 +222,8 @@ mod tests {
     fn valid_config_passes() {
         let config = BenchConfig {
             op: OpType::Read,
-            block_size: 4096,
+            block_sizes: vec![4096],
+            batch_size: 1,
             queue_depth: 32,
             threads: 1,
             duration: 10,
@@ -213,7 +241,8 @@ mod tests {
     fn block_size_not_multiple_of_sector_size() {
         let config = BenchConfig {
             op: OpType::Read,
-            block_size: 1000,
+            block_sizes: vec![1000],
+            batch_size: 1,
             queue_depth: 32,
             threads: 1,
             duration: 10,
@@ -232,7 +261,8 @@ mod tests {
     fn invalid_namespace_fails() {
         let config = BenchConfig {
             op: OpType::Read,
-            block_size: 4096,
+            block_sizes: vec![4096],
+            batch_size: 1,
             queue_depth: 32,
             threads: 1,
             duration: 10,
@@ -251,7 +281,8 @@ mod tests {
     fn queue_depth_clamping() {
         let mut config = BenchConfig {
             op: OpType::Read,
-            block_size: 4096,
+            block_sizes: vec![4096],
+            batch_size: 1,
             queue_depth: 512,
             threads: 1,
             duration: 10,
@@ -270,7 +301,8 @@ mod tests {
     fn queue_depth_no_clamp_when_within_limit() {
         let mut config = BenchConfig {
             op: OpType::Read,
-            block_size: 4096,
+            block_sizes: vec![4096],
+            batch_size: 1,
             queue_depth: 32,
             threads: 1,
             duration: 10,
@@ -283,6 +315,26 @@ mod tests {
         };
         config.clamp_queue_depth(256);
         assert_eq!(config.queue_depth, 32);
+    }
+
+    #[test]
+    fn batch_size_exceeds_queue_depth() {
+        let config = BenchConfig {
+            op: OpType::Read,
+            block_sizes: vec![4096],
+            batch_size: 64,
+            queue_depth: 32,
+            threads: 1,
+            duration: 10,
+            ns_id: 1,
+            pci_addr: None,
+            pattern: Pattern::Random,
+            io_mode: IoMode::Async,
+            quiet: false,
+            driver: Driver::V1,
+        };
+        let err = config.validate(512, 256, &sample_ns_list()).unwrap_err();
+        assert!(err.contains("batch-size 64 exceeds queue-depth 32"));
     }
 
     #[test]

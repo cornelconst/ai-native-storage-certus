@@ -5,7 +5,10 @@ use rand::{Rng, SeedableRng};
 /// Trait for generating logical block addresses.
 pub trait LbaGenerator {
     /// Return the next LBA to use for an IO operation.
-    fn next_lba(&mut self) -> u64;
+    ///
+    /// `blocks_per_io` is the number of sectors this particular IO will touch,
+    /// allowing mixed block-size workloads.
+    fn next_lba(&mut self, blocks_per_io: u64) -> u64;
 }
 
 /// Uniform random LBA generator.
@@ -18,21 +21,22 @@ impl RandomLba {
     /// Create a new random LBA generator.
     ///
     /// `total_sectors` is the namespace size in sectors.
-    /// `blocks_per_io` is the number of sectors per IO operation.
-    pub fn new(total_sectors: u64, blocks_per_io: u64) -> Self {
+    /// `max_blocks_per_io` is the largest number of sectors any single IO may
+    /// touch (derived from the largest configured block size).
+    pub fn new(total_sectors: u64, max_blocks_per_io: u64) -> Self {
         assert!(
-            total_sectors > blocks_per_io,
+            total_sectors > max_blocks_per_io,
             "namespace too small for block size"
         );
         Self {
-            max_lba: total_sectors - blocks_per_io,
+            max_lba: total_sectors - max_blocks_per_io,
             rng: StdRng::from_entropy(),
         }
     }
 }
 
 impl LbaGenerator for RandomLba {
-    fn next_lba(&mut self) -> u64 {
+    fn next_lba(&mut self, _blocks_per_io: u64) -> u64 {
         self.rng.gen_range(0..self.max_lba)
     }
 }
@@ -42,7 +46,6 @@ pub struct SequentialLba {
     current: u64,
     start: u64,
     end: u64,
-    blocks_per_io: u64,
 }
 
 impl SequentialLba {
@@ -51,32 +54,34 @@ impl SequentialLba {
     /// Each thread gets a contiguous region of the namespace. The region
     /// is `total_sectors / num_threads` sectors, starting at
     /// `thread_index * region_size`.
+    ///
+    /// `max_blocks_per_io` is used for region boundary calculation (ensures
+    /// the largest IO never overflows).
     pub fn new(
         thread_index: u32,
         num_threads: u32,
         total_sectors: u64,
-        blocks_per_io: u64,
+        max_blocks_per_io: u64,
     ) -> Self {
         let region_size = total_sectors / num_threads as u64;
         let start = thread_index as u64 * region_size;
         let end = if thread_index == num_threads - 1 {
-            total_sectors - blocks_per_io
+            total_sectors - max_blocks_per_io
         } else {
-            start + region_size - blocks_per_io
+            start + region_size - max_blocks_per_io
         };
         Self {
             current: start,
             start,
             end,
-            blocks_per_io,
         }
     }
 }
 
 impl LbaGenerator for SequentialLba {
-    fn next_lba(&mut self) -> u64 {
+    fn next_lba(&mut self, blocks_per_io: u64) -> u64 {
         let lba = self.current;
-        self.current += self.blocks_per_io;
+        self.current += blocks_per_io;
         if self.current > self.end {
             self.current = self.start;
         }
@@ -92,7 +97,7 @@ mod tests {
     fn random_lba_in_range() {
         let mut gen = RandomLba::new(1_000_000, 8);
         for _ in 0..1000 {
-            let lba = gen.next_lba();
+            let lba = gen.next_lba(8);
             assert!(lba < 1_000_000 - 8);
         }
     }
@@ -100,8 +105,8 @@ mod tests {
     #[test]
     fn sequential_lba_contiguous() {
         let mut gen = SequentialLba::new(0, 1, 1000, 8);
-        let first = gen.next_lba();
-        let second = gen.next_lba();
+        let first = gen.next_lba(8);
+        let second = gen.next_lba(8);
         assert_eq!(first, 0);
         assert_eq!(second, 8);
     }
@@ -110,11 +115,9 @@ mod tests {
     fn sequential_lba_wraps() {
         let mut gen = SequentialLba::new(0, 1, 100, 8);
         let mut last = 0;
-        // Walk through until wrap
         for _ in 0..20 {
-            let lba = gen.next_lba();
+            let lba = gen.next_lba(8);
             if lba < last {
-                // Wrapped around
                 assert_eq!(lba, 0);
                 return;
             }
@@ -133,17 +136,20 @@ mod tests {
             .map(|i| SequentialLba::new(i, num_threads, total_sectors, blocks_per_io))
             .collect();
 
-        // Each thread's first LBA should be in its own region
-        let lbas: Vec<u64> = generators.iter_mut().map(|g| g.next_lba()).collect();
+        let lbas: Vec<u64> = generators
+            .iter_mut()
+            .map(|g| g.next_lba(blocks_per_io))
+            .collect();
 
-        // Verify non-overlapping: each starts at thread_index * region_size
         let region_size = total_sectors / num_threads as u64;
         for (i, &lba) in lbas.iter().enumerate() {
             assert_eq!(lba, i as u64 * region_size);
         }
 
-        // Verify regions don't overlap by checking second LBA is within region
-        let lbas2: Vec<u64> = generators.iter_mut().map(|g| g.next_lba()).collect();
+        let lbas2: Vec<u64> = generators
+            .iter_mut()
+            .map(|g| g.next_lba(blocks_per_io))
+            .collect();
         for (i, &lba) in lbas2.iter().enumerate() {
             let region_start = i as u64 * region_size;
             let region_end = if i as u32 == num_threads - 1 {

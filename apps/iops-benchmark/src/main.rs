@@ -214,6 +214,7 @@ fn main() {
 
     let mut worker_handles = Vec::with_capacity(config.threads as usize);
     let mut op_counters = Vec::with_capacity(config.threads as usize);
+    let mut byte_counters = Vec::with_capacity(config.threads as usize);
 
     for thread_idx in 0..config.threads {
         let channels = ibd.connect_client().unwrap_or_else(|e| {
@@ -223,6 +224,9 @@ fn main() {
 
         let op_counter = Arc::new(AtomicU64::new(0));
         op_counters.push(Arc::clone(&op_counter));
+
+        let byte_counter = Arc::new(AtomicU64::new(0));
+        byte_counters.push(Arc::clone(&byte_counter));
 
         let worker_config = Arc::clone(&config_arc);
         let worker_stop = Arc::clone(&stop_flag);
@@ -243,6 +247,7 @@ fn main() {
                 channels,
                 worker_ns_info,
                 op_counter,
+                byte_counter,
                 worker_stop,
                 thread_idx,
             )
@@ -262,23 +267,30 @@ fn main() {
 
     let timer_stop = Arc::clone(&stop_flag);
     let duration_secs = config.duration;
+    let timer_start = bench_start;
     let timer_handle = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(duration_secs));
+        let elapsed = timer_start.elapsed().as_secs_f64();
         timer_stop.store(true, Ordering::Relaxed);
+        elapsed
     });
 
     // Progress reporting on main thread.
     if !config.quiet {
-        let mut prev_counts: Vec<u64> = vec![0; op_counters.len()];
+        let mut prev_op_counts: Vec<u64> = vec![0; op_counters.len()];
+        let mut prev_byte_count: u64 = 0;
         let mut elapsed = 0u64;
 
         while !stop_flag.load(Ordering::Relaxed) {
             std::thread::sleep(std::time::Duration::from_secs(1));
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
             elapsed += 1;
 
             let per_thread_iops: Vec<u64> = op_counters
                 .iter()
-                .zip(prev_counts.iter_mut())
+                .zip(prev_op_counts.iter_mut())
                 .map(|(counter, prev)| {
                     let current = counter.load(Ordering::Relaxed);
                     let delta = current - *prev;
@@ -288,14 +300,20 @@ fn main() {
                 .collect();
             let total_iops: u64 = per_thread_iops.iter().sum();
 
-            report::print_progress(elapsed, total_iops, &per_thread_iops);
+            let current_bytes: u64 = byte_counters
+                .iter()
+                .map(|c| c.load(Ordering::Relaxed))
+                .sum();
+            let delta_bytes = current_bytes - prev_byte_count;
+            prev_byte_count = current_bytes;
+            let mbps = delta_bytes as f64 / 1_048_576.0;
+
+            report::print_progress(elapsed, total_iops, &per_thread_iops, mbps);
         }
     }
 
     // --- Join all threads ---
-    timer_handle.join().expect("timer thread panicked");
-
-    let actual_duration = bench_start.elapsed().as_secs_f64();
+    let actual_duration = timer_handle.join().expect("timer thread panicked");
 
     let mut results = Vec::with_capacity(worker_handles.len());
     for handle in worker_handles {
@@ -310,7 +328,7 @@ fn main() {
 
     // --- Report ---
     println!();
-    let report = FinalReport::from_results(&results, actual_duration, config.block_size);
+    let report = FinalReport::from_results(&results, actual_duration);
     report::print_final(&report, config.op, &results);
 
     std::process::exit(0);
