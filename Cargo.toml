@@ -13,6 +13,7 @@ members = [
     "apps/iops-benchmark",
     "apps/extent-benchmark",
     "components/block-device-spdk-nvme/v1",
+    "components/block-device-spdk-nvme/v2",
     "components/extent-manager/v0",
     "components/extent-manager/v2",
     "components/logger/v1"
@@ -47,6 +48,7 @@ interfaces = { path = "components/interfaces" }
 spdk-sys = { path = "components/spdk-sys" }
 spdk-env = { path = "components/spdk-env" }
 block-device-spdk-nvme = { path = "components/block-device-spdk-nvme/v1" }
+block-device-spdk-nvme-v2 = { path = "components/block-device-spdk-nvme/v2" }
 logger = { path = "components/logger/v1" }
 
 

@@ -20,13 +20,15 @@ use std::time::Instant;
 
 use clap::Parser;
 
-use block_device_spdk_nvme::{BlockDeviceSpdkNvmeComponentV1, Command, Completion, IBlockDevice};
+use block_device_spdk_nvme::BlockDeviceSpdkNvmeComponentV1;
+use block_device_spdk_nvme_v2::BlockDeviceSpdkNvmeComponentV2;
 use component_core::binding::bind;
 use component_core::iunknown::query;
 use component_core::numa::{set_thread_affinity, CpuSet, NumaTopology};
+use interfaces::{Command, Completion, IBlockDevice};
 use spdk_env::SPDKEnvComponent;
 
-use config::BenchConfig;
+use config::{BenchConfig, Driver};
 use stats::FinalReport;
 
 fn main() {
@@ -34,7 +36,10 @@ fn main() {
 
     // --- Component wiring ---
     let spdk_env_comp = SPDKEnvComponent::new_default();
-    let block_dev = BlockDeviceSpdkNvmeComponentV1::new_default();
+    let block_dev: std::sync::Arc<dyn component_core::IUnknown> = match config.driver {
+        Driver::V1 => BlockDeviceSpdkNvmeComponentV1::new_default(),
+        Driver::V2 => BlockDeviceSpdkNvmeComponentV2::new_default(),
+    };
 
     bind(&*spdk_env_comp, "ISPDKEnv", &*block_dev, "spdk_env").unwrap_or_else(|e| {
         eprintln!("error: failed to bind spdk_env: {e}");

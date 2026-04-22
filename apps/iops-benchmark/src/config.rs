@@ -42,6 +42,24 @@ impl fmt::Display for IoMode {
     }
 }
 
+/// Block device driver version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Driver {
+    /// Block device SPDK NVMe v1.
+    V1,
+    /// Block device SPDK NVMe v2.
+    V2,
+}
+
+impl fmt::Display for Driver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Driver::V1 => write!(f, "v1"),
+            Driver::V2 => write!(f, "v2"),
+        }
+    }
+}
+
 /// IO access pattern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Pattern {
@@ -103,6 +121,10 @@ pub struct BenchConfig {
     /// Suppress per-second progress output.
     #[arg(long, default_value_t = false)]
     pub quiet: bool,
+
+    /// Block device driver version: v1 or v2.
+    #[arg(long, default_value = "v1", value_enum)]
+    pub driver: Driver,
 }
 
 impl BenchConfig {
@@ -182,6 +204,7 @@ mod tests {
             pattern: Pattern::Random,
             io_mode: IoMode::Async,
             quiet: false,
+            driver: Driver::V1,
         };
         assert!(config.validate(512, 256, &sample_ns_list()).is_ok());
     }
@@ -199,6 +222,7 @@ mod tests {
             pattern: Pattern::Random,
             io_mode: IoMode::Async,
             quiet: false,
+            driver: Driver::V1,
         };
         let err = config.validate(512, 256, &sample_ns_list()).unwrap_err();
         assert!(err.contains("not a multiple of device sector size"));
@@ -217,6 +241,7 @@ mod tests {
             pattern: Pattern::Random,
             io_mode: IoMode::Async,
             quiet: false,
+            driver: Driver::V1,
         };
         let err = config.validate(512, 256, &sample_ns_list()).unwrap_err();
         assert!(err.contains("namespace 5 not found"));
@@ -235,6 +260,7 @@ mod tests {
             pattern: Pattern::Random,
             io_mode: IoMode::Async,
             quiet: false,
+            driver: Driver::V1,
         };
         config.clamp_queue_depth(256);
         assert_eq!(config.queue_depth, 256);
@@ -253,6 +279,7 @@ mod tests {
             pattern: Pattern::Random,
             io_mode: IoMode::Async,
             quiet: false,
+            driver: Driver::V1,
         };
         config.clamp_queue_depth(256);
         assert_eq!(config.queue_depth, 32);
@@ -275,5 +302,11 @@ mod tests {
     fn io_mode_display() {
         assert_eq!(format!("{}", IoMode::Sync), "sync");
         assert_eq!(format!("{}", IoMode::Async), "async");
+    }
+
+    #[test]
+    fn driver_display() {
+        assert_eq!(format!("{}", Driver::V1), "v1");
+        assert_eq!(format!("{}", Driver::V2), "v2");
     }
 }
