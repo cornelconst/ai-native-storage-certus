@@ -41,18 +41,60 @@ pub(crate) struct AsyncCompletionEntry {
 
 /// Context passed to SPDK async completion callbacks via raw pointer.
 ///
-/// Boxed and leaked into a raw pointer at submission time; reconstructed
-/// in the callback. The `completions` pointer is valid because callbacks
-/// execute on the actor thread during `process_completions()`.
+/// Allocated from [`ContextPool`] at submission time and returned to the
+/// pool in the callback. The `completions` pointer is valid because
+/// callbacks execute on the actor thread during `process_completions()`.
 struct AsyncIoContext {
     client_id: u64,
     handle: u64,
     is_read: bool,
     completions: *mut Vec<AsyncCompletionEntry>,
+    pool: *mut ContextPool,
     #[cfg(feature = "telemetry")]
     start: Instant,
     #[cfg(feature = "telemetry")]
     bytes: u64,
+}
+
+// SAFETY: AsyncIoContext is only used on the actor thread. Raw pointers
+// (completions, pool) are valid for the actor thread's lifetime.
+unsafe impl Send for AsyncIoContext {}
+
+/// Fixed-capacity slab pool for [`AsyncIoContext`], eliminating per-IO
+/// heap allocation. All operations are single-threaded (actor thread).
+struct ContextPool {
+    #[allow(clippy::vec_box)] // Box required: SPDK takes ownership via Box::into_raw.
+    slots: Vec<Box<AsyncIoContext>>,
+}
+
+impl ContextPool {
+    fn new(capacity: usize) -> Self {
+        Self {
+            slots: Vec::with_capacity(capacity),
+        }
+    }
+
+    /// Acquire a context from the pool, or allocate a new one if empty.
+    fn acquire(&mut self) -> Box<AsyncIoContext> {
+        self.slots.pop().unwrap_or_else(|| {
+            Box::new(AsyncIoContext {
+                client_id: 0,
+                handle: 0,
+                is_read: false,
+                completions: std::ptr::null_mut(),
+                pool: std::ptr::null_mut(),
+                #[cfg(feature = "telemetry")]
+                start: Instant::now(),
+                #[cfg(feature = "telemetry")]
+                bytes: 0,
+            })
+        })
+    }
+
+    /// Return a context to the pool for reuse.
+    fn release(&mut self, ctx: Box<AsyncIoContext>) {
+        self.slots.push(ctx);
+    }
 }
 
 /// SPDK NVMe command completion callback for asynchronous operations.
@@ -66,7 +108,7 @@ unsafe extern "C" fn async_completion_cb(
     ctx: *mut std::ffi::c_void,
     cpl: *const spdk_sys::spdk_nvme_cpl,
 ) {
-    // SAFETY: ctx was created via Box::into_raw(Box::new(AsyncIoContext { .. })).
+    // SAFETY: ctx was created via Box::into_raw from ContextPool::acquire().
     let io_ctx = unsafe { Box::from_raw(ctx as *mut AsyncIoContext) };
     // SAFETY: cpl is a valid SPDK completion entry.
     let status = unsafe { (*cpl).__bindgen_anon_1.status };
@@ -88,19 +130,34 @@ unsafe extern "C" fn async_completion_cb(
         }
     };
 
+    // Extract raw pointers before moving fields out of io_ctx.
+    let completions_ptr = io_ctx.completions;
+    let pool_ptr = io_ctx.pool;
+    let client_id = io_ctx.client_id;
+    let handle = io_ctx.handle;
+    let is_read = io_ctx.is_read;
+    #[cfg(feature = "telemetry")]
+    let latency_ns = io_ctx.start.elapsed().as_nanos() as u64;
+    #[cfg(feature = "telemetry")]
+    let bytes = io_ctx.bytes;
+
     // SAFETY: completions pointer is valid — callback runs on the actor
     // thread during process_completions(), same thread that owns the Vec.
-    let completions = unsafe { &mut *io_ctx.completions };
+    let completions = unsafe { &mut *completions_ptr };
     completions.push(AsyncCompletionEntry {
-        client_id: io_ctx.client_id,
-        handle: io_ctx.handle,
+        client_id,
+        handle,
         result,
-        is_read: io_ctx.is_read,
+        is_read,
         #[cfg(feature = "telemetry")]
-        latency_ns: io_ctx.start.elapsed().as_nanos() as u64,
+        latency_ns,
         #[cfg(feature = "telemetry")]
-        bytes: io_ctx.bytes,
+        bytes,
     });
+
+    // SAFETY: pool pointer is valid — same actor thread owns the pool.
+    let pool = unsafe { &mut *pool_ptr };
+    pool.release(io_ctx);
 }
 
 /// Tracks an in-flight asynchronous IO operation.
@@ -144,6 +201,12 @@ pub(crate) struct BlockDeviceHandler {
     /// Buffer for async SPDK completion entries, filled during
     /// `process_completions()` and drained afterward.
     async_completions: Vec<AsyncCompletionEntry>,
+    /// Reusable scratch buffer for draining completions without allocating.
+    completion_scratch: Vec<AsyncCompletionEntry>,
+    /// Slab pool for async IO context objects, avoiding per-IO heap allocation.
+    context_pool: ContextPool,
+    /// Reusable scratch buffer for timed-out operation handles.
+    timeout_scratch: Vec<u64>,
     /// Telemetry stats collector (feature-gated).
     #[cfg(feature = "telemetry")]
     pub telemetry: Arc<TelemetryStats>,
@@ -190,7 +253,11 @@ unsafe extern "C" fn sync_completion_cb(
 }
 
 impl BlockDeviceHandler {
+    /// Pre-allocated context pool capacity (sum of standard qpair depths).
+    const CONTEXT_POOL_CAPACITY: usize = 340;
+
     /// Create a new handler with the given controller.
+    #[allow(dead_code)]
     pub(crate) fn new(
         controller: NvmeController,
         logger: Option<Arc<dyn ILogger + Send + Sync>>,
@@ -200,6 +267,9 @@ impl BlockDeviceHandler {
             clients: Vec::new(),
             next_handle: 1,
             async_completions: Vec::new(),
+            completion_scratch: Vec::new(),
+            context_pool: ContextPool::new(Self::CONTEXT_POOL_CAPACITY),
+            timeout_scratch: Vec::new(),
             #[cfg(feature = "telemetry")]
             telemetry: Arc::new(TelemetryStats::new()),
             last_timeout_check: Instant::now(),
@@ -219,6 +289,9 @@ impl BlockDeviceHandler {
             clients: Vec::new(),
             next_handle: 1,
             async_completions: Vec::new(),
+            completion_scratch: Vec::new(),
+            context_pool: ContextPool::new(Self::CONTEXT_POOL_CAPACITY),
+            timeout_scratch: Vec::new(),
             telemetry,
             last_timeout_check: Instant::now(),
             logger,
@@ -274,6 +347,8 @@ impl BlockDeviceHandler {
                             #[cfg(feature = "telemetry")]
                             &self.telemetry,
                             &mut self.async_completions,
+                            &mut self.context_pool,
+                            None,
                             cmd,
                         );
                     }
@@ -306,9 +381,9 @@ impl BlockDeviceHandler {
             }
         }
 
-        // Drain async completion entries and route to clients.
-        let entries: Vec<AsyncCompletionEntry> = self.async_completions.drain(..).collect();
-        for entry in entries {
+        // Swap completions into scratch buffer to avoid per-poll allocation.
+        std::mem::swap(&mut self.completion_scratch, &mut self.async_completions);
+        for entry in self.completion_scratch.drain(..) {
             if let Some(client) = self
                 .clients
                 .iter_mut()
@@ -345,13 +420,13 @@ impl BlockDeviceHandler {
     fn check_timeouts(&mut self) {
         let now = Instant::now();
         for client in &mut self.clients {
-            let mut timed_out = Vec::new();
+            self.timeout_scratch.clear();
             for (&handle, op) in &client.pending_ops {
                 if now >= op.deadline {
-                    timed_out.push(handle);
+                    self.timeout_scratch.push(handle);
                 }
             }
-            for handle in timed_out {
+            for &handle in &self.timeout_scratch {
                 client.pending_ops.remove(&handle);
                 let _ = client.session.callback_tx.send(Completion::Timeout {
                     handle: OpHandle(handle),
@@ -401,6 +476,10 @@ impl BlockDeviceHandler {
     }
 
     /// Dispatch a single command from a client.
+    ///
+    /// `qp_idx_override` allows a parent (e.g. `BatchSubmit`) to force all
+    /// sub-commands onto a specific queue pair instead of selecting per-op.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_command(
         controller: &mut NvmeController,
         session: &mut ClientSession,
@@ -408,6 +487,8 @@ impl BlockDeviceHandler {
         next_handle: &mut u64,
         #[cfg(feature = "telemetry")] telemetry: &TelemetryStats,
         async_completions: &mut Vec<AsyncCompletionEntry>,
+        context_pool: &mut ContextPool,
+        qp_idx_override: Option<usize>,
         cmd: Command,
     ) {
         match cmd {
@@ -467,7 +548,7 @@ impl BlockDeviceHandler {
                 let handle = *next_handle;
                 *next_handle += 1;
 
-                // Validate before async submission.
+                // Validate and extract buffer pointer in a single lock.
                 let validation = Self::validate_async_read(controller, ns_id, lba, &buf);
                 if let Err(e) = validation {
                     let _ = session.callback_tx.send(Completion::ReadDone {
@@ -476,10 +557,11 @@ impl BlockDeviceHandler {
                     });
                     return;
                 }
-                let (ns_ptr, num_blocks) = validation.unwrap();
+                #[allow(unused_variables)]
+                let (ns_ptr, num_blocks, buf_ptr, buf_len) = validation.unwrap();
 
-                // Select queue pair sized for this client's concurrency level.
-                let qp_idx = controller.qpairs.select_index(pending_ops.len() + 1);
+                let qp_idx = qp_idx_override
+                    .unwrap_or_else(|| controller.qpairs.select_index(pending_ops.len() + 1));
                 pending_ops.insert(
                     handle,
                     PendingOp {
@@ -491,38 +573,41 @@ impl BlockDeviceHandler {
                     },
                 );
 
-                // Submit async SPDK read.
-                let buf_guard = buf.lock().expect("buffer lock poisoned");
-                let ctx = Box::new(AsyncIoContext {
-                    client_id: session.id,
-                    handle,
-                    is_read: true,
-                    completions: async_completions as *mut Vec<AsyncCompletionEntry>,
-                    #[cfg(feature = "telemetry")]
-                    start: Instant::now(),
-                    #[cfg(feature = "telemetry")]
-                    bytes: buf_guard.len() as u64,
-                });
+                // Submit async SPDK read — buf_ptr was extracted during validation.
+                let mut ctx = context_pool.acquire();
+                ctx.client_id = session.id;
+                ctx.handle = handle;
+                ctx.is_read = true;
+                ctx.completions = async_completions as *mut Vec<AsyncCompletionEntry>;
+                ctx.pool = context_pool as *mut ContextPool;
+                #[cfg(feature = "telemetry")]
+                {
+                    ctx.start = Instant::now();
+                    ctx.bytes = buf_len;
+                }
 
                 let qp = controller
                     .qpairs
                     .get_mut(qp_idx)
                     .expect("qpair index valid");
+                let ctx_raw = Box::into_raw(ctx);
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_read(
                         ns_ptr,
                         qp.as_ptr(),
-                        buf_guard.as_ptr(),
+                        buf_ptr,
                         lba,
                         num_blocks,
                         Some(async_completion_cb),
-                        Box::into_raw(ctx) as *mut std::ffi::c_void,
+                        ctx_raw as *mut std::ffi::c_void,
                         0,
                     )
                 };
 
                 if rc != 0 {
-                    // Submission failed — remove pending op and report immediately.
+                    // SAFETY: submission failed, SPDK did not take ownership.
+                    let ctx = unsafe { Box::from_raw(ctx_raw) };
+                    context_pool.release(ctx);
                     pending_ops.remove(&handle);
                     let _ = session.callback_tx.send(Completion::ReadDone {
                         handle: OpHandle(handle),
@@ -556,8 +641,8 @@ impl BlockDeviceHandler {
                 }
                 let (ns_ptr, num_blocks) = validation.unwrap();
 
-                // Select queue pair sized for this client's concurrency level.
-                let qp_idx = controller.qpairs.select_index(pending_ops.len() + 1);
+                let qp_idx = qp_idx_override
+                    .unwrap_or_else(|| controller.qpairs.select_index(pending_ops.len() + 1));
                 pending_ops.insert(
                     handle,
                     PendingOp {
@@ -570,21 +655,23 @@ impl BlockDeviceHandler {
                 );
 
                 // Submit async SPDK write.
-                let ctx = Box::new(AsyncIoContext {
-                    client_id: session.id,
-                    handle,
-                    is_read: false,
-                    completions: async_completions as *mut Vec<AsyncCompletionEntry>,
-                    #[cfg(feature = "telemetry")]
-                    start: Instant::now(),
-                    #[cfg(feature = "telemetry")]
-                    bytes: buf.len() as u64,
-                });
+                let mut ctx = context_pool.acquire();
+                ctx.client_id = session.id;
+                ctx.handle = handle;
+                ctx.is_read = false;
+                ctx.completions = async_completions as *mut Vec<AsyncCompletionEntry>;
+                ctx.pool = context_pool as *mut ContextPool;
+                #[cfg(feature = "telemetry")]
+                {
+                    ctx.start = Instant::now();
+                    ctx.bytes = buf.len() as u64;
+                }
 
                 let qp = controller
                     .qpairs
                     .get_mut(qp_idx)
                     .expect("qpair index valid");
+                let ctx_raw = Box::into_raw(ctx);
                 let rc = unsafe {
                     spdk_sys::spdk_nvme_ns_cmd_write(
                         ns_ptr,
@@ -593,12 +680,15 @@ impl BlockDeviceHandler {
                         lba,
                         num_blocks,
                         Some(async_completion_cb),
-                        Box::into_raw(ctx) as *mut std::ffi::c_void,
+                        ctx_raw as *mut std::ffi::c_void,
                         0,
                     )
                 };
 
                 if rc != 0 {
+                    // SAFETY: submission failed, SPDK did not take ownership.
+                    let ctx = unsafe { Box::from_raw(ctx_raw) };
+                    context_pool.release(ctx);
                     pending_ops.remove(&handle);
                     let _ = session.callback_tx.send(Completion::WriteDone {
                         handle: OpHandle(handle),
@@ -629,7 +719,7 @@ impl BlockDeviceHandler {
             }
             Command::BatchSubmit { ops } => {
                 let batch_size = ops.len();
-                let _qp_idx = controller.qpairs.select_index(batch_size);
+                let batch_qp_idx = controller.qpairs.select_index(batch_size);
 
                 for op in ops {
                     Self::dispatch_command(
@@ -640,6 +730,8 @@ impl BlockDeviceHandler {
                         #[cfg(feature = "telemetry")]
                         telemetry,
                         async_completions,
+                        context_pool,
+                        Some(batch_qp_idx),
                         op,
                     );
                 }
@@ -881,13 +973,16 @@ impl BlockDeviceHandler {
         Self::poll_sync_completion(qp, &completion, "write_zeros")
     }
 
-    /// Validate an async read request and return the namespace pointer and block count.
+    /// Validate an async read request and return the namespace pointer, block
+    /// count, buffer pointer, and buffer length. Holds the Mutex lock just once
+    /// and extracts all needed values before releasing.
     fn validate_async_read(
         controller: &NvmeController,
         ns_id: u32,
         lba: u64,
         buf: &Arc<std::sync::Mutex<interfaces::DmaBuffer>>,
-    ) -> Result<(*mut spdk_sys::spdk_nvme_ns, u32), NvmeBlockError> {
+    ) -> Result<(*mut spdk_sys::spdk_nvme_ns, u32, *mut std::ffi::c_void, u64), NvmeBlockError>
+    {
         let ns = namespace::validate_ns_id(&controller.namespaces, ns_id)?;
         let buf_guard = buf
             .lock()
@@ -895,10 +990,13 @@ impl BlockDeviceHandler {
         let num_blocks = buf_guard.len() as u64 / ns.sector_size as u64;
         namespace::validate_lba_range(ns, lba, num_blocks)?;
 
+        let buf_ptr = buf_guard.as_ptr();
+        let buf_len = buf_guard.len() as u64;
+
         let ctrlr_ptr = controller.as_ptr();
         // SAFETY: ctrlr_ptr is valid.
         let ns_ptr = unsafe { spdk_sys::spdk_nvme_ctrlr_get_ns(ctrlr_ptr, ns_id) };
-        Ok((ns_ptr, num_blocks as u32))
+        Ok((ns_ptr, num_blocks as u32, buf_ptr, buf_len))
     }
 
     /// Validate an async write request and return the namespace pointer and block count.
