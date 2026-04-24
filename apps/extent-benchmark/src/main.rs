@@ -11,7 +11,7 @@ use clap::Parser;
 use block_device_spdk_nvme::BlockDeviceSpdkNvmeComponentV1;
 use component_core::binding::bind;
 use component_core::iunknown::query;
-use extent_manager_v2::MetadataManager;
+use extent_manager_v2::ExtentManagerV2;
 use interfaces::{DmaBuffer, FormatParams};
 use spdk_env::SPDKEnvComponent;
 
@@ -27,7 +27,7 @@ fn main() {
 
     let spdk_env_comp = SPDKEnvComponent::new_default();
     let block_dev = BlockDeviceSpdkNvmeComponentV1::new_default();
-    let extent_mgr = MetadataManager::new_inner();
+    let extent_mgr = ExtentManagerV2::new_inner();
 
     bind(&*spdk_env_comp, "ISPDKEnv", &*block_dev, "spdk_env").unwrap_or_else(|e| {
         eprintln!("error: bind spdk_env→block_dev: {e}");
@@ -118,7 +118,7 @@ fn main() {
     let params = FormatParams {
         slab_size: config.slab_size,
         max_element_size: config.size_class,
-        metadata_block_size: config.slab_size.min(131072),
+        metadata_block_size: config.slab_size.min(131072) as u32,
         sector_size: 4096,
         region_count: 32,
     };
@@ -326,7 +326,7 @@ fn validate_config(config: &BenchmarkConfig) -> Result<(), String> {
         ));
     }
     if let Some(total) = config.total_size {
-        if total <= config.slab_size as u64 {
+        if total <= config.slab_size {
             return Err(format!(
                 "total-size ({total}) must be greater than slab-size ({})",
                 config.slab_size
