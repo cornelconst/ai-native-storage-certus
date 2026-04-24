@@ -8,6 +8,7 @@ use crate::config::BenchConfig;
 /// Print the configuration summary to stdout.
 pub fn print_config(config: &BenchConfig, pci_addr_str: &str, ns_info: &NamespaceInfo) {
     println!("=== IOPS Benchmark ===");
+    println!("Driver:       {}", config.driver);
     println!("Device:       {}", pci_addr_str);
     println!(
         "Namespace:    {} ({} sectors, {}B sectors)",
@@ -16,7 +17,15 @@ pub fn print_config(config: &BenchConfig, pci_addr_str: &str, ns_info: &Namespac
     println!("Operation:    {}", config.op);
     println!("IO mode:      {}", config.io_mode);
     println!("Pattern:      {}", config.pattern);
-    println!("Block size:   {} bytes", config.block_size);
+    if config.block_sizes.len() == 1 {
+        println!("Block size:   {} bytes", config.block_sizes[0]);
+    } else {
+        let sizes: Vec<String> = config.block_sizes.iter().map(|s| s.to_string()).collect();
+        println!("Block sizes:  [{}] bytes (random)", sizes.join(", "));
+    }
+    if config.batch_size > 1 {
+        println!("Batch size:   {}", config.batch_size);
+    }
     println!("Queue depth:  {}", config.queue_depth);
     println!("Threads:      {}", config.threads);
     println!("Duration:     {} seconds", config.duration);
@@ -25,7 +34,13 @@ pub fn print_config(config: &BenchConfig, pci_addr_str: &str, ns_info: &Namespac
 /// Print a per-second progress line to stderr.
 ///
 /// When `per_thread_iops` has more than one entry, a per-thread breakdown is shown.
-pub fn print_progress(elapsed_secs: u64, total_iops: u64, per_thread_iops: &[u64]) {
+/// `throughput_mbps` is the instantaneous throughput for this interval.
+pub fn print_progress(
+    elapsed_secs: u64,
+    total_iops: u64,
+    per_thread_iops: &[u64],
+    throughput_mbps: f64,
+) {
     if per_thread_iops.len() > 1 {
         let parts: Vec<String> = per_thread_iops
             .iter()
@@ -33,13 +48,17 @@ pub fn print_progress(elapsed_secs: u64, total_iops: u64, per_thread_iops: &[u64
             .map(|(i, &iops)| format!("T{}:{}", i, iops))
             .collect();
         eprintln!(
-            "[{:3}s] {} IOPS  ({})",
+            "[{:3}s] {} IOPS  {:.1} MB/s  ({})",
             elapsed_secs,
             total_iops,
+            throughput_mbps,
             parts.join(", ")
         );
     } else {
-        eprintln!("[{:3}s] {} IOPS", elapsed_secs, total_iops);
+        eprintln!(
+            "[{:3}s] {} IOPS  {:.1} MB/s",
+            elapsed_secs, total_iops, throughput_mbps
+        );
     }
 }
 
@@ -100,7 +119,10 @@ pub fn print_final(
     let total_ops = report.total_read_ops + report.total_write_ops;
     println!("Total ops:    {}", format_count(total_ops));
     println!("Total IOPS:   {}", format_count(report.total_iops as u64));
-    println!("Throughput:   {:.1} MB/s", report.throughput_mbps);
+    println!(
+        "Throughput:   {:.1} MB/s ({:.2} GB/s)",
+        report.throughput_mbps, report.throughput_gbps
+    );
     println!("Errors:       {}", report.total_errors);
     println!();
     println!("Latency (us):");

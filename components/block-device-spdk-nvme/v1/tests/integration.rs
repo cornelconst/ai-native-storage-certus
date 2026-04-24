@@ -1,5 +1,6 @@
 // DmaBuffer is Send but not Sync; Arc<DmaBuffer> is required by Command::WriteSync API.
 #![allow(clippy::arc_with_non_send_sync)]
+#![cfg(feature = "spdk-test")]
 
 //! Integration tests for the SPDK NVMe block device component.
 //!
@@ -31,8 +32,7 @@ fn wire_components() -> (
 
     bind(&*spdk_env, "ISPDKEnv", &*block_dev, "spdk_env")
         .expect("failed to bind spdk_env receptacle");
-    bind(&*logger, "ILogger", &*block_dev, "logger")
-        .expect("failed to bind logger receptacle");
+    bind(&*logger, "ILogger", &*block_dev, "logger").expect("failed to bind logger receptacle");
 
     (block_dev, spdk_env, logger)
 }

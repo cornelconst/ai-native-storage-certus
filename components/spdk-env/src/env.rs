@@ -97,6 +97,10 @@ fn init_spdk_env() -> Result<(), SpdkEnvError> {
         )));
     }
 
+    // Mark the interfaces crate that the SPDK environment is active so that
+    // DmaBuffer drop handlers know it is safe to call SPDK deallocators.
+    interfaces::set_spdk_env_active(true);
+
     Ok(())
 }
 
@@ -182,10 +186,15 @@ fn enumerate_devices(_comp: &SPDKEnvComponent) -> Result<Vec<VfioDevice>, SpdkEn
 
 /// Call `spdk_env_fini()` and clear the singleton flag.
 pub(crate) fn do_fini() {
+    // Mark SPDK inactive so DmaBuffer drops will avoid calling SPDK
+    // deallocators while the environment is being torn down.
+    interfaces::set_spdk_env_active(false);
+
     // SAFETY: spdk_env_fini is safe to call after successful spdk_env_init.
     // We only call this from Drop when initialized is true.
     unsafe {
         spdk_sys::spdk_env_fini();
     }
+
     SPDK_ENV_ACTIVE.store(false, Ordering::Release);
 }

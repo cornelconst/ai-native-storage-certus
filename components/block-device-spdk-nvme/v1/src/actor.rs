@@ -248,8 +248,10 @@ impl BlockDeviceHandler {
     /// Poll all client ingress channels for IO commands.
     ///
     /// Also detects disconnected clients (sender dropped) and removes
-    /// them silently per FR-019.
-    fn poll_clients(&mut self) {
+    /// them silently per FR-019. Returns `true` if any commands or
+    /// completions were processed.
+    fn poll_clients(&mut self) -> bool {
+        let mut did_work = false;
         let mut i = 0;
         while i < self.clients.len() {
             let mut disconnected = false;
@@ -257,6 +259,7 @@ impl BlockDeviceHandler {
                 let client = &mut self.clients[i];
                 match client.session.ingress_rx.try_recv() {
                     Ok(cmd) => {
+                        did_work = true;
                         if matches!(cmd, Command::ControllerReset) {
                             let client_id = self.clients[i].session.id;
                             self.handle_controller_reset(client_id);
@@ -300,8 +303,9 @@ impl BlockDeviceHandler {
         for qp_idx in 0..self.controller.qpairs.len() {
             if let Some(qp) = self.controller.qpairs.get_mut(qp_idx) {
                 // SAFETY: queue pair pointer is valid while controller is alive.
-                unsafe {
-                    qp.process_completions(0);
+                let n = unsafe { qp.process_completions(0) };
+                if n > 0 {
+                    did_work = true;
                 }
             }
         }
@@ -339,6 +343,8 @@ impl BlockDeviceHandler {
                 let _ = client.session.callback_tx.send(completion);
             }
         }
+
+        did_work
     }
 
     /// Check for timed-out async operations across all clients.
@@ -956,8 +962,8 @@ impl ActorHandler<ControlMessage> for BlockDeviceHandler {
         self.check_timeouts();
     }
 
-    fn on_idle(&mut self) {
-        self.poll_clients();
+    fn on_idle(&mut self) -> bool {
+        let did_work = self.poll_clients();
         // Throttle timeout checks to ~1ms — check_timeouts() allocates a Vec
         // and calls Instant::now() for every pending op, which is too expensive
         // to run on every poll iteration (millions/sec).
@@ -966,6 +972,7 @@ impl ActorHandler<ControlMessage> for BlockDeviceHandler {
             self.check_timeouts();
             self.last_timeout_check = now;
         }
+        did_work
     }
 
     fn on_start(&mut self) {
@@ -977,6 +984,28 @@ impl ActorHandler<ControlMessage> for BlockDeviceHandler {
             "actor shutting down, {} clients connected",
             self.clients.len()
         ));
+
+        // Drain all in-flight SPDK operations so completion callbacks don't
+        // fire after the handler (and its async_completions Vec) is dropped.
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        for qp_idx in 0..self.controller.qpairs.len() {
+            if let Some(qp) = self.controller.qpairs.get_mut(qp_idx) {
+                while qp.in_flight() > 0 && Instant::now() < deadline {
+                    unsafe {
+                        qp.process_completions(0);
+                    }
+                }
+                if qp.in_flight() > 0 {
+                    eprintln!(
+                        "warning: qpair {} still has {} in-flight ops after drain timeout",
+                        qp_idx,
+                        qp.in_flight()
+                    );
+                }
+            }
+        }
+        self.async_completions.clear();
+
         for client in &self.clients {
             for &h in client.pending_ops.keys() {
                 let _ = client.session.callback_tx.send(Completion::Error {

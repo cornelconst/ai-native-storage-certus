@@ -9,6 +9,8 @@ pub struct ThreadResult {
     pub write_ops: u64,
     /// Number of IO errors encountered.
     pub errors: u64,
+    /// Total bytes transferred (sum of each completed IO's block size).
+    pub total_bytes: u64,
     /// Per-operation latency samples in nanoseconds.
     pub latencies_ns: Vec<u64>,
 }
@@ -24,9 +26,6 @@ pub struct FinalReport {
     pub total_errors: u64,
     /// Actual measured duration in seconds.
     pub duration_secs: f64,
-    /// Block size from config (for throughput calculation).
-    #[allow(dead_code)]
-    pub block_size: usize,
     /// Read IOPS.
     pub read_iops: f64,
     /// Write IOPS.
@@ -35,6 +34,8 @@ pub struct FinalReport {
     pub total_iops: f64,
     /// Throughput in MB/s.
     pub throughput_mbps: f64,
+    /// Throughput in GB/s.
+    pub throughput_gbps: f64,
     /// Minimum latency in microseconds.
     pub lat_min_us: f64,
     /// Mean latency in microseconds.
@@ -52,11 +53,11 @@ impl FinalReport {
     ///
     /// `results` contains one `ThreadResult` per worker thread.
     /// `duration_secs` is the actual measured benchmark duration.
-    /// `block_size` is the IO block size in bytes.
-    pub fn from_results(results: &[ThreadResult], duration_secs: f64, block_size: usize) -> Self {
+    pub fn from_results(results: &[ThreadResult], duration_secs: f64) -> Self {
         let total_read_ops: u64 = results.iter().map(|r| r.read_ops).sum();
         let total_write_ops: u64 = results.iter().map(|r| r.write_ops).sum();
         let total_errors: u64 = results.iter().map(|r| r.errors).sum();
+        let total_bytes: u64 = results.iter().map(|r| r.total_bytes).sum();
 
         let total_ops = total_read_ops + total_write_ops;
         let read_iops = if duration_secs > 0.0 {
@@ -74,7 +75,12 @@ impl FinalReport {
         } else {
             0.0
         };
-        let throughput_mbps = total_iops * block_size as f64 / 1_048_576.0;
+        let throughput_mbps = if duration_secs > 0.0 {
+            total_bytes as f64 / duration_secs / 1_048_576.0
+        } else {
+            0.0
+        };
+        let throughput_gbps = throughput_mbps / 1_024.0;
 
         // Merge and sort all latency samples for percentile computation.
         let total_samples: usize = results.iter().map(|r| r.latencies_ns.len()).sum();
@@ -102,11 +108,11 @@ impl FinalReport {
             total_write_ops,
             total_errors,
             duration_secs,
-            block_size,
             read_iops,
             write_iops,
             total_iops,
             throughput_mbps,
+            throughput_gbps,
             lat_min_us,
             lat_mean_us,
             lat_p50_us,
@@ -147,9 +153,10 @@ mod tests {
             read_ops: 1000,
             write_ops: 0,
             errors: 0,
+            total_bytes: 1000 * 4096,
             latencies_ns: vec![1000; 1000],
         }];
-        let report = FinalReport::from_results(&results, 10.0, 4096);
+        let report = FinalReport::from_results(&results, 10.0);
         assert!((report.total_iops - 100.0).abs() < 0.01);
         assert_eq!(report.total_read_ops, 1000);
         assert_eq!(report.total_write_ops, 0);
@@ -161,40 +168,36 @@ mod tests {
             read_ops: 10_000,
             write_ops: 0,
             errors: 0,
+            total_bytes: 10_000 * 4096,
             latencies_ns: vec![5000; 10_000],
         }];
-        let report = FinalReport::from_results(&results, 10.0, 4096);
-        // 1000 IOPS * 4096 bytes / 1MB = 3.90625 MB/s
+        let report = FinalReport::from_results(&results, 10.0);
+        // 10000 ops * 4096 bytes / 10s / 1MB = 3.90625 MB/s
         assert!((report.throughput_mbps - 3.90625).abs() < 0.01);
     }
 
     #[test]
     fn percentile_accuracy() {
-        // 10 samples: 1..=10 (in microseconds, stored as nanoseconds * 1000)
         let results = vec![ThreadResult {
             read_ops: 10,
             write_ops: 0,
             errors: 0,
+            total_bytes: 10 * 4096,
             latencies_ns: vec![1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000],
         }];
-        let report = FinalReport::from_results(&results, 1.0, 4096);
+        let report = FinalReport::from_results(&results, 1.0);
 
-        // min = 1000ns = 1.0us
         assert!((report.lat_min_us - 1.0).abs() < 0.01);
-        // max = 10000ns = 10.0us
         assert!((report.lat_max_us - 10.0).abs() < 0.01);
-        // mean = 5500ns = 5.5us
         assert!((report.lat_mean_us - 5.5).abs() < 0.01);
-        // p50: rank = 0.50 * 9 = 4.5 -> interpolate between index 4 (5000) and 5 (6000) = 5500ns = 5.5us
         assert!((report.lat_p50_us - 5.5).abs() < 0.01);
-        // p99: rank = 0.99 * 9 = 8.91 -> interpolate between index 8 (9000) and 9 (10000) = 9910ns = 9.91us
         assert!((report.lat_p99_us - 9.91).abs() < 0.01);
     }
 
     #[test]
     fn empty_results() {
         let results: Vec<ThreadResult> = vec![];
-        let report = FinalReport::from_results(&results, 10.0, 4096);
+        let report = FinalReport::from_results(&results, 10.0);
         assert_eq!(report.total_iops, 0.0);
         assert_eq!(report.lat_min_us, 0.0);
         assert_eq!(report.lat_max_us, 0.0);
@@ -207,16 +210,18 @@ mod tests {
                 read_ops: 500,
                 write_ops: 300,
                 errors: 1,
+                total_bytes: 800 * 4096,
                 latencies_ns: vec![1000, 2000, 3000],
             },
             ThreadResult {
                 read_ops: 600,
                 write_ops: 400,
                 errors: 2,
+                total_bytes: 1000 * 4096,
                 latencies_ns: vec![4000, 5000, 6000],
             },
         ];
-        let report = FinalReport::from_results(&results, 10.0, 4096);
+        let report = FinalReport::from_results(&results, 10.0);
         assert_eq!(report.total_read_ops, 1100);
         assert_eq!(report.total_write_ops, 700);
         assert_eq!(report.total_errors, 3);

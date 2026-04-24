@@ -11,6 +11,7 @@ members = [
     "components/spdk-env",
     "apps/helloworld-mainline",
     "apps/iops-benchmark",
+    "apps/iops-benchmark-md",
     "apps/extent-benchmark",
     "components/block-device-spdk-nvme/v1",
     "components/extent-manager/v2",
@@ -46,6 +47,7 @@ interfaces = { path = "components/interfaces" }
 spdk-sys = { path = "components/spdk-sys" }
 spdk-env = { path = "components/spdk-env" }
 block-device-spdk-nvme = { path = "components/block-device-spdk-nvme/v1" }
+block-device-spdk-nvme-v2 = { path = "components/block-device-spdk-nvme/v2" }
 logger = { path = "components/logger/v1" }
 
 

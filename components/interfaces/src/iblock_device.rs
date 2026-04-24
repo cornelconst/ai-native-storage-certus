@@ -433,8 +433,20 @@ define_interface! {
         /// Set the PCI address of the controller to attach to.
         fn set_pci_address(&self, addr: crate::spdk_types::PciAddress);
 
+        /// Pin the actor thread to a specific CPU core.
+        ///
+        /// Must be called before [`initialize`]. If not called, the actor
+        /// pins to the first CPU on the controller's NUMA node.
+        fn set_actor_cpu(&self, cpu: usize);
+
         /// Initialize the component and start its actor thread.
         fn initialize(&self) -> Result<(), NvmeBlockError>;
+
+        /// Shutdown the component: stop the actor and join its thread.
+        ///
+        /// This ensures no actor threads are executing SPDK code when the
+        /// global SPDK/DPDK environment is torn down.
+        fn shutdown(&self) -> Result<(), NvmeBlockError>;
     }
 }
 

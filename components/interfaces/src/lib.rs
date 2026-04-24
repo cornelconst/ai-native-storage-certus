@@ -25,6 +25,8 @@ mod iextent_manager;
 #[cfg(feature = "spdk")]
 pub use spdk_types::DmaAllocFn;
 #[cfg(feature = "spdk")]
+pub use spdk_types::{is_spdk_env_active, set_spdk_env_active};
+#[cfg(feature = "spdk")]
 pub use spdk_types::{BlockDeviceError, DmaBuffer, PciAddress, PciId, SpdkEnvError, VfioDevice};
 
 #[cfg(feature = "spdk")]
@@ -43,6 +45,6 @@ pub use iextent_manager::Extent;
 pub use iextent_manager::ExtentKey;
 pub use iextent_manager::ExtentManagerError;
 pub use iextent_manager::FormatParams;
-pub use iextent_manager::WriteHandle;
 #[cfg(feature = "spdk")]
 pub use iextent_manager::IExtentManager;
+pub use iextent_manager::WriteHandle;
