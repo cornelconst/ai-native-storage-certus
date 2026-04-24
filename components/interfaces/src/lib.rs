@@ -25,6 +25,8 @@ mod iextent_manager;
 #[cfg(feature = "spdk")]
 pub use spdk_types::DmaAllocFn;
 #[cfg(feature = "spdk")]
+pub use spdk_types::{is_spdk_env_active, set_spdk_env_active};
+#[cfg(feature = "spdk")]
 pub use spdk_types::{BlockDeviceError, DmaBuffer, PciAddress, PciId, SpdkEnvError, VfioDevice};
 
 #[cfg(feature = "spdk")]

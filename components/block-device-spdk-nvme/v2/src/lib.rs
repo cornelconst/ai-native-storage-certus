@@ -81,6 +81,7 @@ define_component! {
         },
         fields: {
             pci_address: RwLock<Option<PciAddress>>,
+            actor_cpu: Mutex<Option<usize>>,
             controller_info: RwLock<Option<ControllerSnapshot>>,
             actor_handle: Mutex<Option<ActorHandle<ControlMessage>>>,
             next_client_id: AtomicU64,
@@ -109,6 +110,10 @@ impl BlockDeviceSpdkNvmeComponentV2 {
         *self.pci_address.write().expect("pci_address lock poisoned") = Some(addr);
     }
 
+    pub(crate) fn set_actor_cpu(&self, cpu: usize) {
+        *self.actor_cpu.lock().expect("actor_cpu lock poisoned") = Some(cpu);
+    }
+
     /// Initialize the component: attach to the NVMe controller and start
     /// the actor thread.
     ///
@@ -119,8 +124,7 @@ impl BlockDeviceSpdkNvmeComponentV2 {
     /// Returns [`NvmeBlockError::NotInitialized`] if receptacles are not
     /// wired, or if the SPDK environment is not initialized.
     pub(crate) fn initialize(&self) -> Result<(), NvmeBlockError> {
-        let logger: Option<std::sync::Arc<dyn ILogger + Send + Sync>> =
-            self.logger.get().ok();
+        let logger: Option<std::sync::Arc<dyn ILogger + Send + Sync>> = self.logger.get().ok();
 
         if !self.spdk_env.is_connected() {
             return Err(NvmeBlockError::NotInitialized(
@@ -139,6 +143,11 @@ impl BlockDeviceSpdkNvmeComponentV2 {
         // SPDK probe/attach for our PCI address.
         // SAFETY: SPDK environment is initialized (checked above).
         let (ctrlr_ptr, numa_node) = unsafe { self.probe_controller()? };
+
+        eprintln!(
+            "block-device-spdk-nvme v2: controller ptr = {:p}, numa = {}",
+            ctrlr_ptr, numa_node
+        );
 
         // SAFETY: ctrlr_ptr is valid from probe.
         let controller = unsafe { NvmeController::attach(ctrlr_ptr, numa_node)? };
@@ -196,21 +205,29 @@ impl BlockDeviceSpdkNvmeComponentV2 {
                 Some(telemetry as std::sync::Arc<dyn std::any::Any + Send + Sync>);
         }
 
-        // Create and activate the actor with NUMA affinity.
+        // Create and activate the actor with CPU affinity.
         let actor: Actor<ControlMessage, BlockDeviceHandler> = Actor::new(handler, |_panic| {});
 
-        // Pin to the NUMA node of the controller.
-        let numa = snapshot.numa_node;
-        if numa >= 0 {
-            if let Ok(topo) = component_core::numa::NumaTopology::discover() {
-                if let Some(node) = topo.node(numa as usize) {
-                    let cpus = node.cpus();
-                    if let Some(cpu) = cpus.iter().next() {
-                        if let Ok(cs) = component_core::numa::CpuSet::from_cpu(cpu) {
-                            let _ = actor.set_cpu_affinity(cs);
-                        }
-                    }
-                }
+        let explicit_cpu = self
+            .actor_cpu
+            .lock()
+            .expect("actor_cpu lock poisoned")
+            .take();
+        let target_cpu = explicit_cpu.or_else(|| {
+            let numa = snapshot.numa_node;
+            if numa >= 0 {
+                component_core::numa::NumaTopology::discover()
+                    .ok()
+                    .and_then(|topo| topo.node(numa as usize).map(|n| n.cpus().iter().next()))
+                    .flatten()
+            } else {
+                None
+            }
+        });
+
+        if let Some(cpu) = target_cpu {
+            if let Ok(cs) = component_core::numa::CpuSet::from_cpu(cpu) {
+                let _ = actor.set_cpu_affinity(cs);
             }
         }
 
@@ -320,12 +337,32 @@ impl BlockDeviceSpdkNvmeComponentV2 {
 
 impl IBlockDeviceAdmin for BlockDeviceSpdkNvmeComponentV2 {
     fn set_pci_address(&self, addr: PciAddress) {
-        // Inherent method is `pub(crate)`; call it here (impl is in same crate).
         self.set_pci_address(addr);
+    }
+
+    fn set_actor_cpu(&self, cpu: usize) {
+        self.set_actor_cpu(cpu);
     }
 
     fn initialize(&self) -> Result<(), NvmeBlockError> {
         self.initialize()
+    }
+
+    fn shutdown(&self) -> Result<(), NvmeBlockError> {
+        let maybe_handle = self
+            .actor_handle
+            .lock()
+            .expect("actor_handle lock poisoned")
+            .take();
+
+        if let Some(handle) = maybe_handle {
+            if let Err(e) = handle.deactivate() {
+                return Err(NvmeBlockError::NotInitialized(format!(
+                    "actor deactivate failed: {e}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -458,6 +495,54 @@ impl IBlockDevice for BlockDeviceSpdkNvmeComponentV2 {
 }
 
 #[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use component_core::actor::{Actor, ActorHandler};
+
+    struct DummyHandler;
+
+    impl ActorHandler<crate::command::ControlMessage> for DummyHandler {
+        fn handle(&mut self, _msg: crate::command::ControlMessage) {}
+    }
+
+    #[test]
+    fn shutdown_deactivates_actor_handle_v2() {
+        fn make_component_local() -> std::sync::Arc<BlockDeviceSpdkNvmeComponentV2> {
+            BlockDeviceSpdkNvmeComponentV2::new(
+                RwLock::new(Some(PciAddress {
+                    domain: 0,
+                    bus: 1,
+                    dev: 0,
+                    func: 0,
+                })),
+                Mutex::new(None),
+                RwLock::new(None),
+                Mutex::new(None),
+                AtomicU64::new(0),
+                Mutex::new(None),
+            )
+        }
+
+        let comp = make_component_local();
+
+        // Create an actor and activate it, obtaining a handle compatible
+        // with the component's actor_handle field type.
+        let actor: Actor<crate::command::ControlMessage, DummyHandler> =
+            Actor::new(DummyHandler, |_| {});
+        let handle = actor.activate().unwrap();
+
+        // Install the handle into the component and call shutdown().
+        *comp.actor_handle.lock().expect("lock poisoned") = Some(handle);
+
+        // Shutdown should take and deactivate the handle, joining the thread.
+        comp.shutdown().expect("shutdown failed");
+
+        // Actor should no longer be active.
+        assert!(!actor.is_active());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use component_core::IUnknown;
@@ -470,6 +555,7 @@ mod tests {
                 dev: 0,
                 func: 0,
             })),
+            Mutex::new(None),
             RwLock::new(None),
             Mutex::new(None),
             AtomicU64::new(0),

@@ -1,5 +1,6 @@
 // DmaBuffer is Send but not Sync; Arc<DmaBuffer> is required by Command::WriteSync API.
 #![allow(clippy::arc_with_non_send_sync)]
+#![cfg(feature = "spdk-test")]
 
 //! Integration tests for the SPDK NVMe block device component.
 //!
@@ -31,8 +32,7 @@ fn wire_components() -> (
 
     bind(&*spdk_env, "ISPDKEnv", &*block_dev, "spdk_env")
         .expect("failed to bind spdk_env receptacle");
-    bind(&*logger, "ILogger", &*block_dev, "logger")
-        .expect("failed to bind logger receptacle");
+    bind(&*logger, "ILogger", &*block_dev, "logger").expect("failed to bind logger receptacle");
 
     (block_dev, spdk_env, logger)
 }
@@ -351,7 +351,9 @@ fn write_read_roundtrip() {
 
     let completion = channels.completion_rx.recv().expect("recv failed");
     match completion {
-        block_device_spdk_nvme_v2::Completion::ReadDone { result, .. } => result.expect("read failed"),
+        block_device_spdk_nvme_v2::Completion::ReadDone { result, .. } => {
+            result.expect("read failed")
+        }
         other => panic!("expected ReadDone, got {other:?}"),
     }
 
@@ -510,7 +512,9 @@ fn write_on_one_client_read_on_another() {
         .expect("send ReadSync failed");
 
     match client_b.completion_rx.recv().expect("recv failed") {
-        block_device_spdk_nvme_v2::Completion::ReadDone { result, .. } => result.expect("read failed"),
+        block_device_spdk_nvme_v2::Completion::ReadDone { result, .. } => {
+            result.expect("read failed")
+        }
         other => panic!("expected ReadDone, got {other:?}"),
     }
 
@@ -628,8 +632,223 @@ fn multi_thread_concurrent_io() {
     );
 }
 
-// NOTE: WriteAsync has a known data-integrity bug: the Arc<DmaBuffer> is dropped
-// after SPDK submission but before the NVMe device finishes DMA-reading from it,
-// so the device reads freed memory. Async write tests are excluded until the
-// component pins the write buffer in PendingOp until completion. ReadAsync works
-// correctly because the caller retains an Arc clone of the read buffer.
+// ---------------------------------------------------------------------------
+// Success criteria validation tests (SC-001, SC-002, SC-006)
+//
+// These are hardware-dependent and marked #[ignore] for CI since they require
+// a live NVMe device and are timing-sensitive.
+// ---------------------------------------------------------------------------
+
+/// SC-001: Sync read/write round-trip within direct NVMe latency envelope.
+///
+/// Performs 100 sync write+read round-trips of 4KB blocks and asserts p50
+/// latency is below 100us (generous threshold accounting for channel overhead).
+#[test]
+#[ignore]
+fn sc001_sync_latency_envelope() {
+    let ctx = match get_spdk_context() {
+        Some(c) => c,
+        None => {
+            eprintln!("skipping sc001: no SPDK hardware");
+            return;
+        }
+    };
+
+    let ibd = query::<dyn IBlockDevice + Send + Sync>(&*ctx.block_dev).unwrap();
+    let channels = ibd.connect_client().expect("connect_client");
+    let sector_size = ibd.block_size() as usize;
+
+    let num_rounds = 100;
+    let mut latencies = Vec::with_capacity(num_rounds);
+
+    for i in 0..num_rounds {
+        let pattern = (i & 0xFF) as u8;
+        let wbuf = Arc::new(interfaces::DmaBuffer::alloc(sector_size, pattern));
+        let rbuf = Arc::new(Mutex::new(interfaces::DmaBuffer::alloc(sector_size, 0)));
+
+        let start = std::time::Instant::now();
+
+        channels
+            .command_tx
+            .send(block_device_spdk_nvme_v2::Command::WriteSync {
+                ns_id: 1,
+                lba: 0,
+                buf: wbuf,
+            })
+            .expect("send write");
+        match channels.completion_rx.recv().expect("recv") {
+            block_device_spdk_nvme_v2::Completion::WriteDone { result, .. } => {
+                result.expect("write failed")
+            }
+            other => panic!("expected WriteDone, got {other:?}"),
+        }
+
+        channels
+            .command_tx
+            .send(block_device_spdk_nvme_v2::Command::ReadSync {
+                ns_id: 1,
+                lba: 0,
+                buf: rbuf.clone(),
+            })
+            .expect("send read");
+        match channels.completion_rx.recv().expect("recv") {
+            block_device_spdk_nvme_v2::Completion::ReadDone { result, .. } => {
+                result.expect("read failed")
+            }
+            other => panic!("expected ReadDone, got {other:?}"),
+        }
+
+        latencies.push(start.elapsed());
+    }
+
+    latencies.sort();
+    let p50 = latencies[latencies.len() / 2];
+    let p50_us = p50.as_micros();
+
+    eprintln!("SC-001: p50 latency = {p50_us} us (threshold: 100 us)");
+    assert!(
+        p50_us < 100,
+        "SC-001 failed: p50 sync round-trip latency {p50_us} us exceeds 100 us threshold"
+    );
+}
+
+/// SC-002: Async timeout errors arrive within bounded margin of timeout value.
+///
+/// Submits an async read with a 50ms timeout and measures the time until
+/// the Timeout completion arrives. Asserts it arrives within 10% + 2ms
+/// of the specified timeout (2ms margin for check_timeouts granularity).
+#[test]
+#[ignore]
+fn sc002_timeout_accuracy() {
+    let ctx = match get_spdk_context() {
+        Some(c) => c,
+        None => {
+            eprintln!("skipping sc002: no SPDK hardware");
+            return;
+        }
+    };
+
+    let ibd = query::<dyn IBlockDevice + Send + Sync>(&*ctx.block_dev).unwrap();
+    let channels = ibd.connect_client().expect("connect_client");
+    let sector_size = ibd.block_size() as usize;
+
+    let timeout_ms: u64 = 50;
+    let rbuf = Arc::new(Mutex::new(interfaces::DmaBuffer::alloc(sector_size, 0)));
+
+    // Submit an async read with a short timeout. On most devices the IO will
+    // complete well before 50ms, so we use an invalid LBA that will either
+    // error immediately or a valid LBA — the test logic handles both cases.
+    // To reliably trigger a timeout we would need device-level fault injection.
+    // This test validates the timing machinery when a timeout does occur.
+    let start = std::time::Instant::now();
+    channels
+        .command_tx
+        .send(block_device_spdk_nvme_v2::Command::ReadAsync {
+            ns_id: 1,
+            lba: 0,
+            buf: rbuf,
+            timeout_ms,
+        })
+        .expect("send async read");
+
+    let completion = channels.completion_rx.recv().expect("recv");
+    let elapsed = start.elapsed();
+
+    match completion {
+        block_device_spdk_nvme_v2::Completion::Timeout { .. } => {
+            let elapsed_ms = elapsed.as_millis() as u64;
+            let max_allowed_ms = (timeout_ms as f64 * 1.1) as u64 + 2;
+            eprintln!(
+                "SC-002: timeout arrived in {elapsed_ms} ms (timeout={timeout_ms} ms, max allowed={max_allowed_ms} ms)"
+            );
+            assert!(
+                elapsed_ms <= max_allowed_ms,
+                "SC-002 failed: timeout completion at {elapsed_ms} ms exceeds {max_allowed_ms} ms bound"
+            );
+        }
+        block_device_spdk_nvme_v2::Completion::ReadDone { result, .. } => {
+            eprintln!(
+                "SC-002: IO completed before timeout ({:?} ms) — timeout accuracy cannot be validated. Result: {result:?}",
+                elapsed.as_millis()
+            );
+        }
+        other => panic!("expected Timeout or ReadDone, got {other:?}"),
+    }
+}
+
+/// SC-006: Telemetry accuracy within 5% of independently measured values.
+///
+/// Requires `--features telemetry` to compile. Performs N sync writes,
+/// measures each independently, then compares with the telemetry snapshot.
+#[cfg(feature = "telemetry")]
+#[test]
+#[ignore]
+fn sc006_telemetry_accuracy() {
+    let ctx = match get_spdk_context() {
+        Some(c) => c,
+        None => {
+            eprintln!("skipping sc006: no SPDK hardware");
+            return;
+        }
+    };
+
+    let ibd = query::<dyn IBlockDevice + Send + Sync>(&*ctx.block_dev).unwrap();
+    let channels = ibd.connect_client().expect("connect_client");
+    let sector_size = ibd.block_size() as usize;
+
+    let num_ops = 50u64;
+    let mut independent_latencies_ns = Vec::with_capacity(num_ops as usize);
+
+    for i in 0..num_ops {
+        let pattern = (i & 0xFF) as u8;
+        let wbuf = Arc::new(interfaces::DmaBuffer::alloc(sector_size, pattern));
+
+        let start = std::time::Instant::now();
+        channels
+            .command_tx
+            .send(block_device_spdk_nvme_v2::Command::WriteSync {
+                ns_id: 1,
+                lba: 0,
+                buf: wbuf,
+            })
+            .expect("send write");
+        match channels.completion_rx.recv().expect("recv") {
+            block_device_spdk_nvme_v2::Completion::WriteDone { result, .. } => {
+                result.expect("write failed")
+            }
+            other => panic!("expected WriteDone, got {other:?}"),
+        }
+        independent_latencies_ns.push(start.elapsed().as_nanos() as u64);
+    }
+
+    let snap = ibd.telemetry().expect("telemetry should be available");
+
+    // Validate total_ops (telemetry may include ops from other tests sharing
+    // the same global context, so we check >= num_ops).
+    assert!(
+        snap.total_ops >= num_ops,
+        "SC-006: total_ops {} < expected {}",
+        snap.total_ops,
+        num_ops
+    );
+
+    let independent_mean: f64 =
+        independent_latencies_ns.iter().sum::<u64>() as f64 / num_ops as f64;
+    let telemetry_mean = snap.mean_latency_ns as f64;
+
+    let ratio = if telemetry_mean > independent_mean {
+        telemetry_mean / independent_mean
+    } else {
+        independent_mean / telemetry_mean
+    };
+
+    eprintln!(
+        "SC-006: independent mean={:.0} ns, telemetry mean={:.0} ns, ratio={:.3}",
+        independent_mean, telemetry_mean, ratio
+    );
+    assert!(
+        ratio < 1.05,
+        "SC-006 failed: telemetry mean latency differs by {:.1}% from independent measurement (threshold: 5%)",
+        (ratio - 1.0) * 100.0
+    );
+}

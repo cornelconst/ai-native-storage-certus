@@ -11,6 +11,7 @@ members = [
     "components/spdk-env",
     "apps/helloworld-mainline",
     "apps/iops-benchmark",
+    "apps/iops-benchmark-md",
     "apps/extent-benchmark",
     "components/block-device-spdk-nvme/v1",
     "components/block-device-spdk-nvme/v2",

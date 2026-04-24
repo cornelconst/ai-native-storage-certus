@@ -94,8 +94,12 @@ pub trait ActorHandler<M: Send + 'static>: Send + 'static {
     ///
     /// Override this for actors that have background work (e.g., polling
     /// IO channels, processing completions) that should run even when no
-    /// control messages are pending. The default implementation is a no-op.
-    fn on_idle(&mut self) {}
+    /// control messages are pending. Return `true` if useful work was done
+    /// (resets the idle counter to prevent premature parking). The default
+    /// implementation is a no-op that returns `false`.
+    fn on_idle(&mut self) -> bool {
+        false
+    }
 }
 
 /// Handle to a running actor. Returned by [`Actor::activate`].
@@ -653,14 +657,23 @@ where
                     }
                     Err(ChannelError::Empty) => {
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            handler.on_idle();
+                            handler.on_idle()
                         }));
 
-                        if let Err(panic_payload) = result {
-                            error_callback(panic_payload);
+                        match result {
+                            Ok(did_work) => {
+                                if did_work {
+                                    idle_count = 0;
+                                } else {
+                                    idle_count += 1;
+                                }
+                            }
+                            Err(panic_payload) => {
+                                error_callback(panic_payload);
+                                idle_count += 1;
+                            }
                         }
 
-                        idle_count += 1;
                         if idle_count >= PARK_THRESHOLD {
                             receiver.register_for_unpark();
                             thread::park_timeout(PARK_DURATION);

@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
 // SpdkEnvError
@@ -197,6 +198,22 @@ pub struct DmaBuffer {
     metadata: BTreeMap<String, String>,
 }
 
+/// Process-global flag set by the SPDK environment component.
+static SPDK_ENV_ACTIVE_FLAG: AtomicBool = AtomicBool::new(false);
+
+/// Set the global SPDK active flag. Called by the SPDK environment component
+/// during init/fini. This allows other code (notably the DmaBuffer Drop
+/// implementation) to avoid calling into SPDK after it has been torn down,
+/// which would otherwise lead to crashes.
+pub fn set_spdk_env_active(active: bool) {
+    SPDK_ENV_ACTIVE_FLAG.store(active, Ordering::Release);
+}
+
+/// Return whether the SPDK environment is currently marked active.
+pub fn is_spdk_env_active() -> bool {
+    SPDK_ENV_ACTIVE_FLAG.load(Ordering::Acquire)
+}
+
 /// Type alias for a pluggable DMA buffer allocator.
 /// Signature: `(size, alignment, numa_node) -> Result<DmaBuffer, String>`.
 pub type DmaAllocFn =
@@ -354,11 +371,17 @@ impl DmaBuffer {
 
 impl Drop for DmaBuffer {
     fn drop(&mut self) {
-        // SAFETY: ptr was allocated by the corresponding allocator and has not
-        // been freed. free_fn is the matching deallocator supplied at
-        // construction time.
-        unsafe {
-            (self.free_fn)(self.ptr);
+        // Only call the SPDK deallocator if the SPDK environment is still
+        // active. If SPDK has been torn down already, calling into the C
+        // deallocator can lead to a crash; in that case we intentionally
+        // skip freeing (the OS will reclaim the memory on process exit).
+        if is_spdk_env_active() {
+            // SAFETY: ptr was allocated by the corresponding allocator and
+            // has not been freed. free_fn is the matching deallocator
+            // supplied at construction time.
+            unsafe {
+                (self.free_fn)(self.ptr);
+            }
         }
     }
 }
