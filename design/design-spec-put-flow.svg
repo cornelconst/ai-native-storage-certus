@@ -1,0 +1,206 @@
+<svg width="100%" viewBox="0 0 780 1140" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>GPU cache put-flow data flow diagram</title>
+  <desc>Data flow diagram showing the synchronous and asynchronous stages of writing a GPU tensor cache block via gRPC, through DRAM staging (pre-allocated pool) to SSD persistence with extent manager finalization.</desc>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      text { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+      .title { font-size: 14px; font-weight: 600; }
+      .subtitle { font-size: 11px; font-weight: 400; }
+      .label { font-size: 11px; font-weight: 400; }
+      .legend { font-size: 11px; }
+      .note { font-size: 10px; font-style: italic; }
+      .section { font-size: 11px; font-weight: 600; letter-spacing: 0.5px; }
+    </style>
+  </defs>
+
+  <!-- ── Legend ─────────────────────────────────────────────── -->
+  <line x1="30" y1="20" x2="66" y2="20" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="72" y="24" class="legend" fill="#3D3D3A">Synchronous path</text>
+  <line x1="200" y1="20" x2="236" y2="20" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="242" y="24" class="legend" fill="#3D3D3A">Asynchronous path</text>
+  <line x1="390" y1="20" x2="426" y2="20" stroke="#C0392B" stroke-width="1.5" stroke-dasharray="2 3" marker-end="url(#arrow)"/>
+  <text x="432" y="24" class="legend" fill="#3D3D3A">Error / back-pressure</text>
+
+  <!-- Color key -->
+  <rect x="580" y="12" width="12" height="12" rx="2" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="596" y="22" class="legend" fill="#3D3D3A">Dispatcher / Hash table</text>
+  <rect x="580" y="28" width="12" height="12" rx="2" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+  <text x="596" y="38" class="legend" fill="#3D3D3A">DRAM</text>
+  <rect x="680" y="12" width="12" height="12" rx="2" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="696" y="22" class="legend" fill="#3D3D3A">Extent mgr</text>
+  <rect x="680" y="28" width="12" height="12" rx="2" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+  <text x="696" y="38" class="legend" fill="#3D3D3A">SSD</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       SYNCHRONOUS SECTION HEADER
+       ══════════════════════════════════════════════════════════ -->
+  <text x="30" y="68" class="section" fill="#1D9E75">SYNCHRONOUS (client blocks)</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 0 — CLIENT  →  REQUEST DISPATCHER
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Client -->
+  <rect x="30" y="80" width="190" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="125" y="103" text-anchor="middle" class="title" fill="#444441">Client process</text>
+  <text x="125" y="121" text-anchor="middle" class="subtitle" fill="#5F5E5A">GPU tensor IPC handle + key</text>
+
+  <!-- Arrow: gRPC call -->
+  <line x1="220" y1="108" x2="378" y2="108" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="299" y="100" text-anchor="middle" class="label" fill="#3D3D3A">1  gRPC: IPC handle + key</text>
+
+  <!-- Request Dispatcher -->
+  <rect x="380" y="80" width="270" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="515" y="103" text-anchor="middle" class="title" fill="#085041">Request Dispatcher</text>
+  <text x="515" y="121" text-anchor="middle" class="subtitle" fill="#0F6E56">Single process, owns staging lifecycle</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 1 — STAGING BUFFER ALLOC + CUDA DMA
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Arrow down: alloc staging buffer -->
+  <line x1="515" y1="136" x2="515" y2="188" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="527" y="168" class="label" fill="#3D3D3A">2  Alloc from pool</text>
+
+  <!-- Staging buffer pool -->
+  <rect x="380" y="190" width="270" height="70" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+  <text x="515" y="213" text-anchor="middle" class="title" fill="#0C447C">DRAM staging buffer</text>
+  <text x="515" y="231" text-anchor="middle" class="subtitle" fill="#185FA5">Pre-allocated pool, ref-counted</text>
+  <text x="515" y="248" text-anchor="middle" class="note" fill="#185FA5">Pool exhausted → back-pressure (gRPC blocks)</text>
+
+  <!-- GPU memory box -->
+  <rect x="30" y="196" width="190" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="125" y="219" text-anchor="middle" class="title" fill="#444441">GPU memory</text>
+  <text x="125" y="237" text-anchor="middle" class="subtitle" fill="#5F5E5A">Fixed-size cache block</text>
+
+  <!-- Arrow: CUDA DMA from GPU to staging -->
+  <line x1="220" y1="224" x2="378" y2="224" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="299" y="216" text-anchor="middle" class="label" fill="#3D3D3A">cudaMemcpyAsync</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 2 — HASH TABLE (register → DRAM state)
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Arrow down: DMA complete -->
+  <line x1="515" y1="260" x2="515" y2="310" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="527" y="290" class="label" fill="#3D3D3A">3  DMA complete</text>
+
+  <!-- Hash table (DRAM state) -->
+  <rect x="380" y="312" width="270" height="70" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="515" y="333" text-anchor="middle" class="title" fill="#085041">Hash table</text>
+  <text x="515" y="351" text-anchor="middle" class="subtitle" fill="#0F6E56">Atomic insert: key → DRAM ptr</text>
+  <text x="515" y="369" text-anchor="middle" class="note" fill="#0F6E56">Two states: DRAM ptr | SSD offset. Dup key → replace in DRAM</text>
+
+  <!-- ACK arrow back to client -->
+  <path d="M380 340 L260 340 L260 108 L222 108" fill="none" stroke="#1D9E75" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="240" y="330" text-anchor="middle" class="label" fill="#3D3D3A">4  ACK (available for get from DRAM)</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ASYNC BOUNDARY
+       ══════════════════════════════════════════════════════════ -->
+  <line x1="30" y1="410" x2="750" y2="410" stroke="#888" stroke-width="0.5" stroke-dasharray="6 4"/>
+  <text x="390" y="430" text-anchor="middle" class="section" fill="#7F77DD">ASYNCHRONOUS (client already acked)</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 3 — EXTENT ALLOCATION
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Arrow down: alloc extent -->
+  <line x1="515" y1="382" x2="515" y2="448" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="527" y="424" class="label" fill="#3D3D3A">5  Alloc SSD extent</text>
+
+  <!-- Extent manager (alloc) -->
+  <rect x="380" y="450" width="270" height="70" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="515" y="471" text-anchor="middle" class="title" fill="#3C3489">Extent manager</text>
+  <text x="515" y="489" text-anchor="middle" class="subtitle" fill="#534AB7">Single contiguous extent (block + marker)</text>
+  <text x="515" y="507" text-anchor="middle" class="note" fill="#534AB7">No free space → trigger eviction, then retry</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 4 — DMA: DRAM → SSD
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Arrow down: trigger DMA -->
+  <line x1="515" y1="520" x2="515" y2="570" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="527" y="550" class="label" fill="#3D3D3A">6  DMA: DRAM → SSD</text>
+
+  <!-- DRAM staging ref (left) -->
+  <rect x="30" y="578" width="190" height="56" rx="8" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.5"/>
+  <text x="125" y="601" text-anchor="middle" class="title" fill="#0C447C">DRAM staging buffer</text>
+  <text x="125" y="619" text-anchor="middle" class="subtitle" fill="#185FA5">DMA source</text>
+
+  <!-- SSD device -->
+  <rect x="380" y="572" width="270" height="70" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+  <text x="515" y="593" text-anchor="middle" class="title" fill="#633806">SSD (allocated extent)</text>
+  <text x="515" y="611" text-anchor="middle" class="subtitle" fill="#854F0B">DMA write in progress</text>
+  <text x="515" y="629" text-anchor="middle" class="note" fill="#C0392B">DMA failure → FATAL (hardware fault)</text>
+
+  <!-- Arrow DRAM → SSD -->
+  <line x1="220" y1="606" x2="378" y2="606" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="299" y="598" text-anchor="middle" class="label" fill="#3D3D3A">DMA copy</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 5 — MARKER WRITE + EXTENT FINALIZE (two separate writes)
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Arrow down: DMA complete -->
+  <line x1="515" y1="642" x2="515" y2="692" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="527" y="672" class="label" fill="#3D3D3A">7a  DMA complete</text>
+
+  <!-- Marker block write -->
+  <rect x="380" y="694" width="165" height="66" rx="8" fill="#FAEEDA" stroke="#854F0B" stroke-width="0.5"/>
+  <text x="462" y="715" text-anchor="middle" class="title" fill="#633806">Marker block</text>
+  <text x="462" y="731" text-anchor="middle" class="subtitle" fill="#854F0B">Write to SSD tail</text>
+  <text x="462" y="747" text-anchor="middle" class="note" fill="#854F0B">key, size, checksum, timestamp</text>
+
+  <!-- Arrow: marker → extent finalize -->
+  <line x1="545" y1="727" x2="578" y2="727" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="562" y="718" text-anchor="middle" class="label" fill="#3D3D3A">then</text>
+
+  <!-- Extent finalize -->
+  <rect x="580" y="694" width="165" height="66" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.5"/>
+  <text x="662" y="715" text-anchor="middle" class="title" fill="#3C3489">Extent manager</text>
+  <text x="662" y="731" text-anchor="middle" class="subtitle" fill="#534AB7">7b  Mark finalized</text>
+  <text x="662" y="747" text-anchor="middle" class="note" fill="#534AB7">Persistent (survives crash)</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 6 — HASH TABLE UPDATE (DRAM → SSD)
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Arrow down -->
+  <line x1="515" y1="760" x2="515" y2="810" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="527" y="790" class="label" fill="#3D3D3A">8  Update residency</text>
+
+  <!-- Hash table (SSD state) -->
+  <rect x="380" y="812" width="270" height="56" rx="8" fill="#E1F5EE" stroke="#0F6E56" stroke-width="0.5"/>
+  <text x="515" y="833" text-anchor="middle" class="title" fill="#085041">Hash table</text>
+  <text x="515" y="853" text-anchor="middle" class="subtitle" fill="#0F6E56">Atomic swap: key → SSD offset (gets now served from SSD)</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ROW 7 — RELEASE STAGING BUFFER
+       ══════════════════════════════════════════════════════════ -->
+
+  <!-- Arrow down -->
+  <line x1="515" y1="868" x2="515" y2="918" stroke="#7F77DD" stroke-width="1.5" stroke-dasharray="5 3" marker-end="url(#arrow)"/>
+  <text x="527" y="898" class="label" fill="#3D3D3A">9  Release staging</text>
+
+  <!-- Staging release -->
+  <rect x="380" y="920" width="270" height="56" rx="8" fill="#F1EFE8" stroke="#5F5E5A" stroke-width="0.5"/>
+  <text x="515" y="941" text-anchor="middle" class="title" fill="#444441">DRAM staging buffer</text>
+  <text x="515" y="959" text-anchor="middle" class="subtitle" fill="#5F5E5A">Returned to pool (when ref count → 0)</text>
+
+  <!-- ══════════════════════════════════════════════════════════
+       FINAL STATE + CRASH RECOVERY
+       ══════════════════════════════════════════════════════════ -->
+  <line x1="30" y1="1000" x2="750" y2="1000" stroke="#888" stroke-width="0.5"/>
+
+  <text x="390" y="1024" text-anchor="middle" class="section" fill="#444441">FINAL STATE</text>
+  <text x="390" y="1044" text-anchor="middle" class="label" fill="#3D3D3A">Cache block SSD-resident | hash table updated | staging freed | available for get</text>
+
+  <text x="390" y="1074" text-anchor="middle" class="section" fill="#444441">CRASH RECOVERY</text>
+  <text x="390" y="1094" text-anchor="middle" class="label" fill="#3D3D3A">Hash table rebuilt by iterating extent manager finalized extents</text>
+  <text x="390" y="1112" text-anchor="middle" class="note" fill="#5F5E5A">Non-finalized extents reclaimed | DRAM-only entries lost (cache semantics: acceptable)</text>
+
+</svg>
