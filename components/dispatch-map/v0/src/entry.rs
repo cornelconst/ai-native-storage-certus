@@ -17,6 +17,7 @@ pub(crate) enum Location {
 #[derive(Debug)]
 pub(crate) struct DispatchEntry {
     pub location: Location,
+    #[allow(dead_code)]
     pub size_blocks: u32,
     pub read_ref: u32,
     pub write_ref: u32,
