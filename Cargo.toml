@@ -15,7 +15,8 @@ members = [
     "apps/extent-benchmark",
     "components/block-device-spdk-nvme/v1",
     "components/extent-manager/v2",
-    "components/logger/v1"
+    "components/logger/v1",
+    "components/dispatch-map/v0"
 ]
 
 # SPDK crates require pre-built native libraries at deps/spdk-build/.
@@ -49,5 +50,6 @@ spdk-env = { path = "components/spdk-env" }
 block-device-spdk-nvme = { path = "components/block-device-spdk-nvme/v1" }
 block-device-spdk-nvme-v2 = { path = "components/block-device-spdk-nvme/v2" }
 logger = { path = "components/logger/v1" }
+dispatch-map = { path = "components/dispatch-map/v0" }
 
 
