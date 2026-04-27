@@ -249,9 +249,9 @@ impl IExtentManager for ExtentManagerV2 {
                 "slab_size must be a multiple of sector_size",
             ));
         }
-        if params.max_element_size as u64 > params.slab_size {
+        if params.max_extent_size as u64 > params.slab_size {
             return Err(error::corrupt_metadata(
-                "max_element_size must be <= slab_size",
+                "max_extent_size must be <= slab_size",
             ));
         }
         if params.region_count == 0 || !params.region_count.is_power_of_two() {
@@ -260,13 +260,7 @@ impl IExtentManager for ExtentManagerV2 {
             ));
         }
 
-        // Query data device size
-        let data_bd = self
-            .block_device
-            .get()
-            .map_err(|_| error::not_initialized("data block device not connected"))?;
-        let data_disk_size = data_bd.num_sectors(1).map_err(error::nvme_to_em)?
-            * data_bd.sector_size(1).map_err(error::nvme_to_em)? as u64;
+        let data_disk_size = params.data_disk_size;
 
         // Query metadata device size
         let metadata_bd = self
@@ -277,8 +271,13 @@ impl IExtentManager for ExtentManagerV2 {
             * metadata_bd.sector_size(1).map_err(error::nvme_to_em)? as u64;
 
         // Compute checkpoint region layout on metadata device
-        let checkpoint_region_offset =
-            superblock::SUPERBLOCK_SIZE as u64 + params.metadata_padding;
+        let alignment = params.metadata_alignment;
+        let sb_size = superblock::SUPERBLOCK_SIZE as u64;
+        let checkpoint_region_offset = if alignment == 0 {
+            sb_size
+        } else {
+            (sb_size + alignment - 1) / alignment * alignment
+        };
         let remaining = metadata_disk_size.saturating_sub(checkpoint_region_offset);
         let sector_size_u64 = params.sector_size as u64;
         let checkpoint_region_size = (remaining / 2) / sector_size_u64 * sector_size_u64;
@@ -311,7 +310,7 @@ impl IExtentManager for ExtentManagerV2 {
             data_disk_size,
             params.sector_size,
             params.slab_size,
-            params.max_element_size,
+            params.max_extent_size,
             params.region_count,
             checkpoint_region_offset,
             checkpoint_region_size,
@@ -343,21 +342,15 @@ impl IExtentManager for ExtentManagerV2 {
         let (sb, per_region_data) = recovery::recover(&metadata_client, self)?;
 
         let format_params = FormatParams {
+            data_disk_size: sb.data_disk_size,
             slab_size: sb.slab_size,
-            max_element_size: sb.max_element_size,
+            max_extent_size: sb.max_extent_size,
             sector_size: sb.sector_size,
             region_count: sb.region_count,
-            metadata_padding: sb.checkpoint_region_offset
-                .saturating_sub(superblock::SUPERBLOCK_SIZE as u64),
+            metadata_alignment: sb.checkpoint_region_offset,
         };
 
-        // Query data device size for buddy allocator setup
-        let data_bd = self
-            .block_device
-            .get()
-            .map_err(|_| error::not_initialized("data block device not connected"))?;
-        let data_disk_size = data_bd.num_sectors(1).map_err(error::nvme_to_em)?
-            * data_bd.sector_size(1).map_err(error::nvme_to_em)? as u64;
+        let data_disk_size = sb.data_disk_size;
 
         let region_count = sb.region_count as usize;
         let region_bytes = data_disk_size / region_count as u64;

@@ -253,7 +253,7 @@ again to verify the old slot is now reusable.
   interface with two IBlockDevice receptacles: `block_device` (data)
   and `metadata_device` (metadata).
 - **FR-002**: `format()` MUST validate all FormatParams: `sector_size
-  > 0`, `slab_size` is a multiple of `sector_size`, `max_element_size
+  > 0`, `slab_size` is a multiple of `sector_size`, `max_extent_size
   <= slab_size`, `region_count` is a positive power of two, metadata
   device is large enough for two checkpoint regions.
 - **FR-003**: `format()` MUST write a superblock at LBA 0 of the
@@ -344,9 +344,9 @@ again to verify the old slot is now reusable.
 - **WriteHandle**: RAII two-phase commit handle. Holds a reserved
   slot; call `publish()` to commit or `abort()` / drop to release.
 - **FormatParams**: Configuration for `format()`. All size fields
-  are in bytes: `slab_size` (u64), `max_element_size` (u32),
-  `sector_size` (u32), `metadata_padding` (u64), plus
-  `region_count` (u32).
+  are in bytes: `data_disk_size` (u64), `slab_size` (u64),
+  `max_extent_size` (u32), `sector_size` (u32),
+  `metadata_alignment` (u64), plus `region_count` (u32).
 - **Superblock**: On-disk header at LBA 0 of the metadata device
   (4096 bytes). Contains format parameters, active checkpoint
   indicator, checkpoint region layout, sequence number, and CRC32.
@@ -383,13 +383,13 @@ again to verify the old slot is now reusable.
 
 ```
 [Superblock: 4096 bytes]
-[Padding: metadata_padding bytes]
+[Padding to metadata_alignment boundary]
 [Checkpoint Copy 0: checkpoint_region_size bytes]
 [Checkpoint Copy 1: checkpoint_region_size bytes]
 ```
 
 Where:
-- `checkpoint_region_offset = 4096 + metadata_padding`
+- `checkpoint_region_offset = align_up(4096, metadata_alignment)`
 - `checkpoint_region_size = (metadata_disk_size - checkpoint_region_offset) / 2`
   (rounded down to sector alignment)
 
@@ -402,7 +402,7 @@ Where:
 | 12 | 8 | data_disk_size |
 | 20 | 4 | sector_size |
 | 24 | 8 | slab_size |
-| 32 | 4 | max_element_size |
+| 32 | 4 | max_extent_size |
 | 36 | 4 | region_count |
 | 40 | 8 | checkpoint_seq |
 | 48 | 1 | active_copy (0 or 1) |

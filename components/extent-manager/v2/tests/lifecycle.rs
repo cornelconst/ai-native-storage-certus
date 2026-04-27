@@ -6,16 +6,17 @@ const DISK_SIZE: u64 = 64 * 1024 * 1024; // 64 MiB
 const METADATA_DISK_SIZE: u64 = 16 * 1024 * 1024; // 16 MiB
 const SECTOR_SIZE: u32 = 4096;
 const SLAB_SIZE: u64 = 1024 * 1024; // 1 MiB
-const MAX_ELEMENT_SIZE: u32 = 65536;
-const METADATA_PADDING: u64 = 1048576; // 1 MiB
+const MAX_EXTENT_SIZE: u32 = 65536;
+const METADATA_ALIGNMENT: u64 = 1048576; // 1 MiB
 
 fn format_params() -> FormatParams {
     FormatParams {
+        data_disk_size: DISK_SIZE,
         slab_size: SLAB_SIZE,
-        max_element_size: MAX_ELEMENT_SIZE,
+        max_extent_size: MAX_EXTENT_SIZE,
         sector_size: SECTOR_SIZE,
         region_count: 4,
-        metadata_padding: METADATA_PADDING,
+        metadata_alignment: METADATA_ALIGNMENT,
     }
 }
 
@@ -105,11 +106,12 @@ fn out_of_space() {
     let small_disk: u64 = SLAB_SIZE + SECTOR_SIZE as u64 * 2;
     let (c, _data_mock, _metadata_mock) = create_test_component(small_disk, METADATA_DISK_SIZE);
     c.format(FormatParams {
+        data_disk_size: small_disk,
         slab_size: SLAB_SIZE,
-        max_element_size: MAX_ELEMENT_SIZE,
+        max_extent_size: MAX_EXTENT_SIZE,
         sector_size: SECTOR_SIZE,
         region_count: 1,
-        metadata_padding: METADATA_PADDING,
+        metadata_alignment: METADATA_ALIGNMENT,
     })
     .expect("format");
 

@@ -12,7 +12,7 @@ pub struct Superblock {
     pub data_disk_size: u64,
     pub sector_size: u32,
     pub slab_size: u64,
-    pub max_element_size: u32,
+    pub max_extent_size: u32,
     pub region_count: u32,
     pub checkpoint_seq: u64,
     pub active_copy: u8,
@@ -26,7 +26,7 @@ impl Superblock {
         data_disk_size: u64,
         sector_size: u32,
         slab_size: u64,
-        max_element_size: u32,
+        max_extent_size: u32,
         region_count: u32,
         checkpoint_region_offset: u64,
         checkpoint_region_size: u64,
@@ -37,7 +37,7 @@ impl Superblock {
             data_disk_size,
             sector_size,
             slab_size,
-            max_element_size,
+            max_extent_size,
             region_count,
             checkpoint_seq: 0,
             active_copy: 0,
@@ -61,7 +61,7 @@ impl Superblock {
         pos += 4;
         buf[pos..pos + 8].copy_from_slice(&self.slab_size.to_le_bytes());
         pos += 8;
-        buf[pos..pos + 4].copy_from_slice(&self.max_element_size.to_le_bytes());
+        buf[pos..pos + 4].copy_from_slice(&self.max_extent_size.to_le_bytes());
         pos += 4;
         buf[pos..pos + 4].copy_from_slice(&self.region_count.to_le_bytes());
         pos += 4;
@@ -105,7 +105,7 @@ impl Superblock {
         pos += 4;
         let slab_size = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
         pos += 8;
-        let max_element_size = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+        let max_extent_size = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
         pos += 4;
         let region_count = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
         pos += 4;
@@ -135,7 +135,7 @@ impl Superblock {
             data_disk_size,
             sector_size,
             slab_size,
-            max_element_size,
+            max_extent_size,
             region_count,
             checkpoint_seq,
             active_copy,
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(recovered.data_disk_size, 1024 * 1024 * 1024);
         assert_eq!(recovered.sector_size, 4096);
         assert_eq!(recovered.slab_size, 1024 * 1024);
-        assert_eq!(recovered.max_element_size, 65536);
+        assert_eq!(recovered.max_extent_size, 65536);
         assert_eq!(recovered.region_count, 32);
         assert_eq!(recovered.checkpoint_seq, 0);
         assert_eq!(recovered.active_copy, 0);

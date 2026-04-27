@@ -9,16 +9,17 @@ const DISK_SIZE: u64 = 256 * 1024 * 1024;
 const METADATA_DISK_SIZE: u64 = 16 * 1024 * 1024;
 const SECTOR_SIZE: u32 = 4096;
 const SLAB_SIZE: u64 = 1024 * 1024;
-const MAX_ELEMENT_SIZE: u32 = 65536;
-const METADATA_PADDING: u64 = 1048576;
+const MAX_EXTENT_SIZE: u32 = 65536;
+const METADATA_ALIGNMENT: u64 = 1048576;
 
 fn format_params() -> FormatParams {
     FormatParams {
+        data_disk_size: DISK_SIZE,
         slab_size: SLAB_SIZE,
-        max_element_size: MAX_ELEMENT_SIZE,
+        max_extent_size: MAX_EXTENT_SIZE,
         sector_size: SECTOR_SIZE,
         region_count: 8,
-        metadata_padding: METADATA_PADDING,
+        metadata_alignment: METADATA_ALIGNMENT,
     }
 }
 

@@ -159,11 +159,12 @@ fn main() {
     });
 
     let params = FormatParams {
+        data_disk_size: total_size,
         slab_size: config.slab_size,
-        max_element_size: config.size_class,
+        max_extent_size: config.size_class,
         sector_size: 4096,
         region_count: 32,
-        metadata_padding: 1048576, // 1 MiB
+        metadata_alignment: 1048576, // 1 MiB
     };
     if let Err(e) = iem.format(params) {
         eprintln!("error: extent manager format failed: {e}");

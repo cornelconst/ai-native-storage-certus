@@ -69,8 +69,8 @@ RegionState
 Metadata Device:
 ┌──────────┬────────────┬──────────────────┬──────────────────┐
 │Superblock│  Padding   │ Checkpoint Copy 0│ Checkpoint Copy 1│
-│  4 KiB   │ metadata_  │ checkpoint_      │ checkpoint_      │
-│          │ padding    │ region_size      │ region_size      │
+│  4 KiB   │ (to       │ checkpoint_      │ checkpoint_      │
+│          │ alignment) │ region_size      │ region_size      │
 └──────────┴────────────┴──────────────────┴──────────────────┘
 
 Data Device:

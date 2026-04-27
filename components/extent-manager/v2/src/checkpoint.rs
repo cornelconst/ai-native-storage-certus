@@ -271,11 +271,12 @@ mod tests {
         use interfaces::FormatParams;
 
         let fp = FormatParams {
+            data_disk_size: 2 * 1024 * 1024,
             slab_size: 1024 * 1024,
-            max_element_size: 65536,
+            max_extent_size: 65536,
             sector_size: 4096,
             region_count: 2,
-            metadata_padding: 1048576,
+            metadata_alignment: 1048576,
         };
 
         let mut r0 = RegionState::new(0, BuddyAllocator::new(0, 1024 * 1024, 4096), fp.clone());
