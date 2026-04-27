@@ -56,6 +56,9 @@ pub struct FormatParams {
     /// The first checkpoint region starts at the first multiple of this
     /// value that is >= the superblock size.
     pub metadata_alignment: u64,
+    /// Instance identifier stored in the superblock. If zero, a random
+    /// value is generated at format time.
+    pub instance_id: u64,
 }
 
 pub struct WriteHandle {
@@ -144,5 +147,7 @@ define_interface! {
         fn remove_extent(&self, key: ExtentKey) -> Result<(), ExtentManagerError>;
 
         fn checkpoint(&self) -> Result<(), ExtentManagerError>;
+
+        fn get_instance_id(&self) -> Result<u64, ExtentManagerError>;
     }
 }
