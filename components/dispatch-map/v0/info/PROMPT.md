@@ -23,5 +23,10 @@ established good engineering practice, maintainability and meeting performance r
 
 Build README.md to summarize the component.
 
+/speckit-plan
+
+/speckit-tasks
+
+/speckit-impl
 
 

@@ -34,3 +34,10 @@ DispatchMapComponentV0 --> [IDispatchMap provider]
 
 - `component-framework`, `component-core`, `component-macros` — at `../../component-framework/crates/`
 - `interfaces` — at `../../interfaces` — where `IDispatchMap`, `ILogger`, and `IExtentManager` are defined
+
+## Active Technologies
+- Rust stable, edition 2021, MSRV 1.75 + component-framework, component-core, component-macros, interfaces (with `spdk` feature) (001-dispatch-map)
+- In-memory `HashMap`; persistence delegated to `IExtentManager` (001-dispatch-map)
+
+## Recent Changes
+- 001-dispatch-map: Added Rust stable, edition 2021, MSRV 1.75 + component-framework, component-core, component-macros, interfaces (with `spdk` feature)
