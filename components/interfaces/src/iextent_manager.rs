@@ -56,9 +56,32 @@ pub struct FormatParams {
     /// The first checkpoint region starts at the first multiple of this
     /// value that is >= the superblock size.
     pub metadata_alignment: u64,
-    /// Instance identifier stored in the superblock. If zero, a random
+    /// Instance identifier stored in the superblock. If None, a random
     /// value is generated at format time.
-    pub instance_id: u64,
+    pub instance_id: Option<u64>,
+}
+
+impl FormatParams {
+    pub fn new(data_disk_size: u64) -> Self {
+        Self {
+            data_disk_size,
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for FormatParams {
+    fn default() -> Self {
+        Self {
+            data_disk_size: 0,
+            slab_size: 1024 * 1024 * 1024,         // 1 GiB
+            max_extent_size: 1024 * 1024 * 1024,    // 1 GiB
+            sector_size: 4096,                       // 4 KiB
+            region_count: 16,
+            metadata_alignment: 128 * 1024,          // 128 KiB
+            instance_id: None,
+        }
+    }
 }
 
 pub struct WriteHandle {
