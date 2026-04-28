@@ -267,8 +267,8 @@ fn corrupt_active_falls_back_to_previous() {
         let sb = extent_manager_v2::superblock::Superblock::deserialize(&sb_data).unwrap();
         drop(state);
 
-        let active_offset = sb.checkpoint_region_offset
-            + sb.active_copy as u64 * sb.checkpoint_region_size;
+        let active_offset =
+            sb.checkpoint_region_offset + sb.active_copy as u64 * sb.checkpoint_region_size;
         let active_lba = active_offset / SECTOR_SIZE as u64;
 
         let mut state = metadata_shared.lock().unwrap();
@@ -381,7 +381,8 @@ fn remove_then_checkpoint_frees_slot() {
 fn invalid_magic_returns_error() {
     let metadata_mock = Arc::new(MockBlockDevice::new(METADATA_DISK_SIZE));
     {
-        let mut state = metadata_mock.shared_state().lock().unwrap();
+        let mock = metadata_mock.shared_state();
+        let mut state = mock.lock().unwrap();
         let mut bad_sb = vec![0u8; 4096];
         bad_sb[0..8].copy_from_slice(&0xDEADu64.to_le_bytes());
         state.blocks.insert(0, bad_sb);

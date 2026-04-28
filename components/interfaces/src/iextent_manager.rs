@@ -123,6 +123,18 @@ impl Drop for WriteHandle {
     }
 }
 
+impl fmt::Debug for WriteHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WriteHandle")
+            .field("key", &self.key)
+            .field("offset", &self.offset)
+            .field("size", &self.size)
+            .field("has_publish_fn", &self.publish_fn.is_some())
+            .field("has_abort_fn", &self.abort_fn.is_some())
+            .finish()
+    }
+}
+
 #[cfg(feature = "spdk")]
 define_interface! {
     pub IExtentManager {
