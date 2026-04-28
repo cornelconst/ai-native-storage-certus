@@ -17,7 +17,7 @@ fn format_params() -> FormatParams {
         sector_size: SECTOR_SIZE,
         region_count: 4,
         metadata_alignment: METADATA_ALIGNMENT,
-        instance_id: 0,
+        instance_id: None,
     }
 }
 
@@ -113,7 +113,7 @@ fn out_of_space() {
         sector_size: SECTOR_SIZE,
         region_count: 1,
         metadata_alignment: METADATA_ALIGNMENT,
-        instance_id: 0,
+        instance_id: None,
     })
     .expect("format");
 

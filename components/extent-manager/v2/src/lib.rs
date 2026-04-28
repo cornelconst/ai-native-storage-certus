@@ -306,15 +306,16 @@ impl IExtentManager for ExtentManagerV2 {
         }
 
         // Write superblock to metadata device
-        let instance_id = if params.instance_id != 0 {
-            params.instance_id
-        } else {
-            use std::io::Read;
-            let mut buf = [0u8; 8];
-            std::fs::File::open("/dev/urandom")
-                .and_then(|mut f| f.read_exact(&mut buf))
-                .map(|_| u64::from_le_bytes(buf))
-                .map_err(|e| error::io_error(&format!("failed to generate instance_id: {e}")))?
+        let instance_id = match params.instance_id {
+            Some(id) => id,
+            None => {
+                use std::io::Read;
+                let mut buf = [0u8; 8];
+                std::fs::File::open("/dev/urandom")
+                    .and_then(|mut f| f.read_exact(&mut buf))
+                    .map(|_| u64::from_le_bytes(buf))
+                    .map_err(|e| error::io_error(&format!("failed to generate instance_id: {e}")))?
+            }
         };
 
         let sb = Superblock::new(
@@ -360,7 +361,7 @@ impl IExtentManager for ExtentManagerV2 {
             sector_size: sb.sector_size,
             region_count: sb.region_count,
             metadata_alignment: sb.checkpoint_region_offset,
-            instance_id: sb.instance_id,
+            instance_id: Some(sb.instance_id),
         };
 
         let data_disk_size = sb.data_disk_size;
