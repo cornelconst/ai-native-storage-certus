@@ -1,5 +1,5 @@
 //! Interface for the extent-manager component and shared types.
-
+#[cfg(feature = "spdk")]
 use component_macros::define_interface;
 use std::fmt;
 
